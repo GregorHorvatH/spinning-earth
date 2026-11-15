@@ -14,7 +14,8 @@ An animated, rotating globe in pure Python: green continents on a blue ocean, a 
 - **Stars** that pulse slowly.
 - **Fullscreen** - the picture scales together with the window.
 - The animation is driven by real time, so the speed is the same in a window and in fullscreen, and on a fast or a slow computer.
-- **Automatic quality** - on a slow machine the program drops detail step by step until the animation runs smoothly (see [Performance](#performance)).
+- **Control panel** - a live FPS counter and a checkbox for every layer, so you can switch layers on and off yourself (see [Control panel](#control-panel)).
+- **Automatic quality** - on a slow machine the program drops detail step by step until the animation runs smoothly. It can be switched off with a checkbox (see [Performance](#performance)).
 
 ## Requirements
 
@@ -58,11 +59,35 @@ On Windows use `python` or `py` instead of `python3`.
 | Action | Result |
 |---|---|
 | `F` or `F11` | toggle fullscreen |
-| double-click the window | same |
+| double-click the globe | same |
+| `H` | hide / show the control panel |
 | `Esc` | leave fullscreen |
 | close the window | quit |
 
 The scale follows the smaller side of the window, so on wide screens the globe simply gets more space around it.
+
+## Control panel
+
+The panel on the left shows the current **FPS** and the **graphics level** (`full`, or `reduced` / `low` / `minimal (auto)` if the automatic quality reduction has kicked in). Below it is one checkbox per layer:
+
+| Checkbox | Layer |
+|---|---|
+| Stars | background stars |
+| Atmosphere | the glow around the globe |
+| Ocean | the ocean disc |
+| Continents | land and coastlines |
+| Day / night | the night side and the gradient between day and night |
+| City lights | lights on the night side |
+| Clouds | clouds |
+| Satellites | the satellites and their trails |
+| ISS | the space station |
+
+A ticked box means the layer is shown; an unticked one hides it completely (and a hidden layer costs nothing to draw, so switching layers off also raises the frame rate).
+
+- **Day / night** off means the whole globe is lit evenly and the atmosphere is not dimmed. City lights only exist at night, so they disappear too.
+- **Auto-reduce graphics** is the automatic quality reduction for slow computers (see [Performance](#performance)). Untick it and the graphics will never be degraded automatically; if it had already degraded them, they are restored to full at once.
+- The panel is a column next to the picture, not an overlay: native widgets on top of a canvas that is redrawn every frame make macOS recompose them constantly, which cost about 25 FPS in testing. Hiding it with `H` shrinks the window back by the panel's width.
+- Set `SHOW_PANEL = False` in [index.py](index.py) to start with the panel hidden.
 
 ## Configuration
 
@@ -73,7 +98,8 @@ All parameters are constants at the top of [index.py](index.py). Change a value 
 | `WIDTH`, `HEIGHT`, `RADIUS` | window and globe size |
 | `SPEED` | rotation speed (degrees per animation step; one step = `TICK_MS` ms) |
 | `TARGET_FPS` | frame rate to aim for (the speed of motion does not depend on it) |
-| `AUTO_QUALITY`, `QUALITY_MIN_FPS` | automatic quality reduction on slow machines, and the frame rate below which it kicks in |
+| `SHOW_PANEL` | whether the control panel is visible at start |
+| `AUTO_QUALITY`, `QUALITY_MIN_FPS`, `QUALITY_WINDOW` | automatic quality reduction on slow machines, the frame rate below which it kicks in, and how many recent frames it looks at |
 | `TILT` | tilt of the Earth's axis |
 | `OCEAN`, `LAND_FILL`, `LAND_EDGE` | ocean and land colours |
 | `NIGHT_START`, `NIGHT_END`, `NIGHT_DARKNESS` | where the day-to-night transition starts and ends, and how dark the night side gets |
@@ -102,13 +128,14 @@ Measured on the development laptop (macOS, Python 3.14, Tk 9.0), frames per seco
 | | window | fullscreen |
 |---|---|---|
 | before optimisation | 41 | 31 |
-| now | 93 | 63 |
+| now (control panel shown) | 89 | 62 |
+| now (panel hidden) | 93 | 63 |
 
 `TARGET_FPS` is set to 120, which this machine does not reach (see the numbers above); on a faster computer it will. Most of what remains is Tk compositing the two transparent layers (atmosphere and night gradient), not Python.
 
 ### Slow computers
 
-With `AUTO_QUALITY = True` (the default) the program watches the real frame rate. If it stays below `QUALITY_MIN_FPS` (40), it drops to a simpler level, one step at a time, and never goes back up until the window is resized:
+With `AUTO_QUALITY = True` (the default; the **Auto-reduce graphics** checkbox) the program watches the real frame rate. It looks at the *median* of the last `QUALITY_WINDOW` (90) frames, so a one-off stall (dragging the window, a system hiccup, the slow first frames) cannot trigger it; only a consistently low rate can. If the median stays below `QUALITY_MIN_FPS` (40), it drops to a simpler level, one step at a time, and never goes back up until the window is resized:
 
 | Level | What is dropped |
 |---|---|
@@ -118,7 +145,9 @@ With `AUTO_QUALITY = True` (the default) the program watches the real frame rate
 
 On a simulated slow machine (every frame artificially made more expensive) this took the frame rate from about 30 to about 60 fps. That is a simulation on a fast laptop, not a measurement on real slow hardware.
 
-If it is still too slow, you can lower `CLOUD_SYSTEMS`, `STAR_COUNT`, `SATELLITE_COUNT` and `ATMO_WIDTH`, or set `AUTO_QUALITY = False` to always get full detail.
+If it is still too slow, switch off the heaviest layers in the panel (clouds, atmosphere and day / night cost the most), or lower `CLOUD_SYSTEMS`, `STAR_COUNT`, `SATELLITE_COUNT` and `ATMO_WIDTH`. Untick **Auto-reduce graphics** (or set `AUTO_QUALITY = False`) to always get full detail.
+
+A layer is shown only if its checkbox is ticked **and** the automatic quality level has not dropped it.
 
 ## Layout
 

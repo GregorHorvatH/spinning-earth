@@ -12,8 +12,24 @@ WIDTH, HEIGHT = 700, 700
 RADIUS = 250
 TILT = math.radians(23.5)   # axial tilt of the globe
 SPEED = math.radians(0.3)   # rotation angle per frame
+# Layers the user can switch on and off in the panel: (key, label)
+LAYERS = [
+    ("stars", "Stars"),
+    ("atmo", "Atmosphere"),
+    ("ocean", "Ocean"),
+    ("land", "Continents"),
+    ("night", "Day / night"),
+    ("cities", "City lights"),
+    ("clouds", "Clouds"),
+    ("sats", "Satellites"),
+    ("iss", "ISS"),
+]
+layer_on = {key: True for key, _ in LAYERS}  # current state of the checkboxes (cached, so frames never ask Tk)
+
 TICK_MS = 25                # animation time unit: SPEED, ISS_SPEED, etc. are "per 25 ms" (= 40 steps/s)
+SHOW_PANEL = True           # show the control panel (FPS + layer checkboxes) at start; H hides / shows it
 AUTO_QUALITY = True         # on a slow machine, drop detail step by step until the animation runs smoothly
+QUALITY_WINDOW = 90        # the decision is the MEDIAN of this many recent frames, so a single hiccup never counts
 QUALITY_MIN_FPS = 40        # if the real frame rate stays below this, switch to the next (simpler) quality level
 TARGET_FPS = 120            # frame rate to aim for (the speed of motion does NOT depend on it)
 COAST_STEP = 4              # max step (degrees) when densifying outlines
@@ -247,6 +263,8 @@ CLOUD_HALO_DARK, CLOUD_SHADOW_DARK, CLOUD_BODY_DARK = darken(CLOUD_HALO), darken
 
 def night_factor(x):
     """0 = day ... 1 = full night for a screen x (pixels), smooth S-curve across the transition."""
+    if not layer_on["night"]:
+        return 0.0
     s = clamp01((NIGHT_START * RADIUS - x) / ((NIGHT_START - NIGHT_END) * RADIUS))
     return s * s * (3 - 2 * s)
 
@@ -580,7 +598,7 @@ screen = turtle.Screen()
 screen.setup(WIDTH, HEIGHT)
 screen.screensize(WIDTH - 40, HEIGHT - 40)  # canvas slightly smaller than the window: (0, 0) stays centred, no scrollbars
 screen.bgcolor(BG)
-screen.title("Обертовий глобус  —  F або подвійний клік: повний екран, Esc: вийти")
+screen.title("Spinning Earth  -  F or double-click: fullscreen, H: panel, Esc: quit")
 screen.tracer(0)
 cv = screen.getcanvas()  # draw directly on the tkinter canvas - faster than turtle
 _tcl, _cw = cv.tk.call, cv._canvas._w
@@ -601,8 +619,8 @@ root = cv.winfo_toplevel()
 fullscreen = False
 last_size = None
 quality = 0          # 0 = everything ... 3 = minimal (only ever goes down; resets when the window size changes)
-frame_avg = None     # smoothed real frame interval (ms)
-quality_wait = 0     # frames to wait after a change before judging again
+recent = []          # real intervals (ms) between the last frames
+quality_wait = 60    # frames to wait (start-up, or after a change) before judging again
 static_k = None   # scale the static layer was built for (None = not built yet)
 static_imgs = []  # keeps the PhotoImage objects alive
 last_time = None
@@ -624,8 +642,9 @@ def exit_fullscreen(event=None):
         set_fullscreen(False)
 
 
-for key in ("<f>", "<F>", "<F11>", "<Double-Button-1>"):
+for key in ("<f>", "<F>", "<F11>"):
     root.bind(key, toggle_fullscreen)
+cv.bind("<Double-Button-1>", toggle_fullscreen, add="+")  # on the canvas only: a fast double click on a checkbox must not toggle fullscreen
 root.bind("<Escape>", exit_fullscreen)
 
 
@@ -702,6 +721,8 @@ def fill(poly, color):
 
 def night_level(x):
     """0 = day, N = full night (for x in pixels)."""
+    if not layer_on["night"]:
+        return 0
     f = (NIGHT_START * RADIUS - x) / ((NIGHT_START - NIGHT_END) * RADIUS)
     return max(0, min(N, round(f * N)))
 
@@ -771,8 +792,8 @@ def build_stars(k):
 
 def update_stars():
     global last_star_tick
-    if quality >= 1:
-        return  # no twinkling on a slow machine
+    if quality >= 1 or not layer_on["stars"]:
+        return  # no twinkling on a slow machine (or while the stars are switched off)
     if tick - last_star_tick < STAR_UPDATE_EVERY:
         return
     last_star_tick = tick
@@ -950,6 +971,9 @@ def build_static(k):
     """Builds the layers that do not change between frames and tags them "static":
     atmosphere tiles, the ocean (a plain oval + its dark part) and the narrow night-gradient strip."""
     global static_k, static_imgs, last_star_tick, XE
+    # the "full night" line is exactly where the gradient strip begins, so land, clouds and the dark ocean all
+    # switch to night colours on the same pixel column; with the night layer off there is no such line at all
+    XE = math.ceil(NIGHT_END * RADIUS * k) / k if layer_on["night"] else -1e9
     cv.delete("all")
     static_imgs = []
     build_stars(k)  # stars go first = they are at the very bottom
@@ -959,43 +983,55 @@ def build_static(k):
         static_imgs.append(img)
         cv.create_image(x0, y0, image=img, anchor="nw", tags=("static", "atmo"))
     r = RADIUS * k
-    cv.create_oval(-r, -r, r, r, fill=OCEAN, outline="", tags="static")
+    cv.create_oval(-r, -r, r, r, fill=OCEAN, outline="", tags=("static", "ocean"))
     circle = [(RADIUS * math.cos(2 * math.pi * i / 360), RADIUS * math.sin(2 * math.pi * i / 360)) for i in range(360)]
     x0, top, width, height, png = make_night_strip(k)
-    XE = x0 / k  # from now on the "full night" line is exactly where the strip begins: land, clouds and the
-    #              dark ocean all switch to night colours on the same pixel column (no seam, no double darkening)
-    dark = clip_left(circle, XE)
-    cv.create_polygon([c * k for p in dark for c in (p[0], -p[1])], fill=OCEAN_DARK, outline="", tags="static")
+    if layer_on["night"]:
+        dark = clip_left(circle, XE)
+        cv.create_polygon([c * k for p in dark for c in (p[0], -p[1])], fill=OCEAN_DARK, outline="",
+                          tags=("static", "ocean"))
     img = tkinter.PhotoImage(master=root, data=base64.b64encode(png))
     static_imgs.append(img)
     cv.create_image(x0, -top, image=img, anchor="nw", tags=("static", "shade"))
     static_k = k
 
 
-def apply_quality():
-    """Level 1: no cloud halo, no star twinkle. 2: half the clouds, no satellite trails, only the main city
+def apply_visibility():
+    """Shows or hides the persistent canvas items: a layer is visible if its checkbox is ticked AND the
+    automatic quality level has not dropped it.
+    Quality level 1: no cloud halo, no star twinkle. 2: half the clouds, no satellite trails, only the main city
     lights, no atmosphere glow. 3: no clouds, no city lights, no stars."""
-    cv.itemconfigure("atmo", state="hidden" if quality >= 2 else "normal")
-    cv.itemconfigure("stars", state="hidden" if quality >= 3 else "normal")
+    def state(on):
+        return "normal" if on else "hidden"
+    cv.itemconfigure("stars", state=state(layer_on["stars"] and quality < 3))
+    cv.itemconfigure("atmo", state=state(layer_on["atmo"] and quality < 2))
+    cv.itemconfigure("ocean", state=state(layer_on["ocean"]))
+    cv.itemconfigure("shade", state=state(layer_on["night"]))
 
 
 def adapt_quality(interval_ms):
-    """Watches the real frame interval and, if the machine cannot keep up, lowers the quality one level."""
-    global quality, frame_avg, quality_wait
+    """Watches the real frame intervals and, if the machine cannot keep up, lowers the quality one level.
+    It uses the median of the last QUALITY_WINDOW frames: a one-off stall (window drag, a system hiccup,
+    the slow first frames) cannot trigger it, only a consistently low frame rate can."""
+    global quality, quality_wait
     if not AUTO_QUALITY or quality >= 3:
         return
-    frame_avg = interval_ms if frame_avg is None else 0.9 * frame_avg + 0.1 * interval_ms
+    recent.append(interval_ms)
+    if len(recent) > QUALITY_WINDOW:
+        del recent[0]
     quality_wait -= 1
-    if quality_wait <= 0 and frame_avg > 1000.0 / QUALITY_MIN_FPS:
+    if quality_wait <= 0 and len(recent) >= QUALITY_WINDOW \
+            and sorted(recent)[len(recent) // 2] > 1000.0 / QUALITY_MIN_FPS:
         quality += 1
-        quality_wait = 90
-        frame_avg = None
-        apply_quality()
+        quality_wait = QUALITY_WINDOW
+        recent.clear()
+        apply_visibility()
 
 
 def draw_frame():
-    global angle, tick, last_time, quality, frame_avg, quality_wait
+    global angle, tick, last_time, quality, quality_wait
     started = time.perf_counter()
+    update_fps(started)
     if last_time is not None and started - last_time < 0.5:
         adapt_quality((started - last_time) * 1000)
     # animation depends on real time, not on the frame count:
@@ -1006,23 +1042,33 @@ def draw_frame():
     k = fit_to_window()
     if k != static_k:
         if static_k is not None:   # window size changed: judge the quality again from scratch
-            quality, frame_avg, quality_wait = 0, None, 60
+            quality, quality_wait = 0, 60
+            recent.clear()
         build_static(k)
-        apply_quality()               # static layer (atmosphere and ocean) is drawn once and again on resize
+        apply_visibility()            # static layer (atmosphere and ocean) is drawn once and again on resize
     else:
         cv.delete("dyn")              # the rest of the frame is redrawn every time
     update_stars()                    # twinkle the (persistent) background stars
-    draw_satellites(front=False)      # satellites behind the Earth
-    draw_iss(front=False)             # ISS when it is behind the Earth
+    if layer_on["sats"]:
+        draw_satellites(front=False)  # satellites behind the Earth
+    if layer_on["iss"]:
+        draw_iss(front=False)         # ISS when it is behind the Earth
     cv.addtag_all("behind")           # everything behind the Earth is lowered beneath the static layer (atmosphere and ocean)
     cv.dtag("static", "behind")
     cv.tag_lower("behind")
-    draw_land(angle)                  # continents
-    draw_clouds(angle)                # clouds
+    if layer_on["land"]:
+        draw_land(angle)              # continents
+    if layer_on["clouds"]:
+        draw_clouds(angle)            # clouds
+    else:
+        update_clouds(tick * SPEED * CLOUD_DRIFT)  # keep the cloud systems moving so they are in place when switched on
     cv.tag_raise("shade")             # night shade over the land and clouds (city lights, satellites go above it)
-    draw_cities(angle)                # city lights on the night side
-    draw_satellites(front=True)       # satellites in front of the Earth
-    draw_iss(front=True)              # ISS in front of the Earth
+    if layer_on["cities"] and layer_on["night"]:
+        draw_cities(angle)            # city lights on the night side
+    if layer_on["sats"]:
+        draw_satellites(front=True)   # satellites in front of the Earth
+    if layer_on["iss"]:
+        draw_iss(front=True)          # ISS in front of the Earth
 
     cv.addtag_all("dyn")              # tag everything drawn in this frame
     cv.dtag("static", "dyn")
@@ -1035,5 +1081,96 @@ def draw_frame():
     screen.ontimer(draw_frame, max(1, int(1000 / TARGET_FPS - spent)))  # aim for TARGET_FPS if we can keep up
 
 
+PANEL_BG, PANEL_FG = "#0d141c", "#dbe4ee"
+GRAPHICS_NAMES = ["full", "reduced", "low", "minimal"]
+layer_vars = {}
+panel_visible = SHOW_PANEL
+fps_frames, fps_since = 0, time.perf_counter()
+panel_width = 0
+
+
+def on_layer_toggle(key):
+    global static_k
+    layer_on[key] = bool(layer_vars[key].get())
+    if key == "night":
+        static_k = None  # night changes the atmosphere dimming and the full-night line: rebuild the static layers
+    else:
+        apply_visibility()
+
+
+def on_auto_toggle():
+    global AUTO_QUALITY, quality, quality_wait
+    AUTO_QUALITY = bool(auto_var.get())
+    recent.clear()
+    quality_wait = 60
+    if not AUTO_QUALITY and quality:
+        quality = 0  # switched off by the user = full graphics again: restore everything that was dropped
+        apply_visibility()
+
+
+def resize_window_by(dx):
+    """Grows / shrinks the window by dx pixels (not in fullscreen), so the globe area keeps its size."""
+    if not fullscreen:
+        root.update_idletasks()
+        root.geometry("%dx%d" % (root.winfo_width() + dx, root.winfo_height()))
+
+
+def toggle_panel(event=None):
+    """Shows / hides the side panel. It sits NEXT to the canvas, not on top of it: native widgets lying over a
+    canvas that is redrawn every frame make the OS recompose them constantly (measured: ~25 FPS slower)."""
+    global panel_visible
+    panel_visible = not panel_visible
+    if panel_visible:
+        panel.pack(side="left", fill="y", before=cv)
+        resize_window_by(panel_width)
+    else:
+        panel.pack_forget()
+        resize_window_by(-panel_width)
+
+
+def build_panel():
+    """Control panel in a column left of the canvas: FPS, one checkbox per layer, and the auto-quality checkbox."""
+    global panel, fps_label, graphics_label, auto_var, panel_width
+    panel = tkinter.Frame(root, bg=PANEL_BG, padx=14, pady=12)
+    look = dict(bg=PANEL_BG, fg=PANEL_FG, activebackground=PANEL_BG, activeforeground=PANEL_FG,
+                selectcolor=PANEL_BG, highlightthickness=0, bd=0, anchor="w", font=("Helvetica", 12))
+    fps_label = tkinter.Label(panel, text="-- FPS", bg=PANEL_BG, fg="#7dffb0", anchor="w",
+                              font=("Helvetica", 18, "bold"))
+    fps_label.pack(anchor="w")
+    graphics_label = tkinter.Label(panel, text="Graphics: full", bg=PANEL_BG, fg="#8a99a8", anchor="w",
+                                   font=("Helvetica", 11))
+    graphics_label.pack(anchor="w", pady=(0, 6))
+    tkinter.Label(panel, text="LAYERS", bg=PANEL_BG, fg="#8a99a8", anchor="w", font=("Helvetica", 10, "bold")).pack(anchor="w")
+    for key, label in LAYERS:
+        layer_vars[key] = tkinter.BooleanVar(master=root, value=layer_on[key])
+        tkinter.Checkbutton(panel, text=label, variable=layer_vars[key],
+                            command=lambda k=key: on_layer_toggle(k), **look).pack(fill="x")
+    tkinter.Frame(panel, bg="#26323f", height=1).pack(fill="x", pady=8)
+    auto_var = tkinter.BooleanVar(master=root, value=AUTO_QUALITY)
+    tkinter.Checkbutton(panel, text="Auto-reduce graphics", variable=auto_var, command=on_auto_toggle,
+                        **look).pack(fill="x")
+    tkinter.Label(panel, text="H - hide panel", bg=PANEL_BG, fg="#5b6b7b", anchor="w",
+                  font=("Helvetica", 10)).pack(anchor="w", pady=(6, 0))
+    root.update_idletasks()
+    panel_width = panel.winfo_reqwidth()
+    if panel_visible:
+        panel.pack(side="left", fill="y", before=cv)
+        screen.setup(WIDTH + panel_width, HEIGHT)  # widen the window by the panel: the globe area stays WIDTH wide
+
+
+def update_fps(now):
+    """Refreshes the FPS readout twice a second (not every frame - label updates are not free)."""
+    global fps_frames, fps_since
+    fps_frames += 1
+    if now - fps_since >= 0.5:
+        if panel_visible:
+            fps_label.config(text="%d FPS" % round(fps_frames / (now - fps_since)))
+            graphics_label.config(text="Graphics: " + GRAPHICS_NAMES[quality] + (" (auto)" if quality else ""))
+        fps_frames, fps_since = 0, now
+
+
+for key in ("<h>", "<H>"):
+    root.bind(key, toggle_panel)
+build_panel()
 draw_frame()
 screen.mainloop()
