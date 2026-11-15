@@ -911,8 +911,9 @@ def draw_clouds(rot):
     cr, sr = math.cos(rot), math.sin(rot)
     scale = RADIUS * CLOUD_SCALE
     puffs = []
+    step = 2 if quality >= 2 else 1  # slow machine: a FIXED half of every cluster (its puffs never change)
     for system in CLOUD_LIST:
-        for cphi, sphi, slon, clon, a_east, a_north in system["puffs"]:
+        for cphi, sphi, slon, clon, a_east, a_north in system["puffs"][::step]:
             sl = slon * cr + clon * sr          # sin(lon + rot)
             cl = clon * cr - slon * sr          # cos(lon + rot)
             if sphi * ST + cphi * cl * CT < 0.12:
@@ -923,8 +924,6 @@ def draw_clouds(rot):
             puffs.append((cphi * sl * scale, (sphi * CT - cphi * cl * ST) * scale, ax, ay, bx, by,
                           math.sqrt(ay * ay + by * by), math.sqrt(ax * ax + bx * bx)))
 
-    if quality >= 2:
-        puffs = puffs[::2]
     # draw each layer for all puffs together so they merge into a single cloud
     cs = CLOUD_CS
     layers = ((1.3, 0.0, CLOUD_HALO, CLOUD_HALO_DARK),
