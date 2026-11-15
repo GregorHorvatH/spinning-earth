@@ -1,14 +1,21 @@
+import base64
 import math
 import random
+import struct
 import time
+import tkinter
 import turtle
+import zlib
 
 # --- Settings ---
 WIDTH, HEIGHT = 700, 700
 RADIUS = 250
 TILT = math.radians(23.5)   # axial tilt of the globe
 SPEED = math.radians(0.3)   # rotation angle per frame
-FRAME_MS = 25               # ~40 frames/s
+TICK_MS = 25                # animation time unit: SPEED, ISS_SPEED, etc. are "per 25 ms" (= 40 steps/s)
+AUTO_QUALITY = True         # on a slow machine, drop detail step by step until the animation runs smoothly
+QUALITY_MIN_FPS = 40        # if the real frame rate stays below this, switch to the next (simpler) quality level
+TARGET_FPS = 120            # frame rate to aim for (the speed of motion does NOT depend on it)
 COAST_STEP = 4              # max step (degrees) when densifying outlines
 
 BG = "#050a08"
@@ -17,17 +24,15 @@ LAND_FILL = "#0d7a38"
 LAND_EDGE = "#7dffb0"
 
 # --- Night on the left hemisphere ---
-OCEAN_NIGHT = "#010206"      # ocean in darkness
 LAND_NIGHT = "#010802"       # land in darkness
-EDGE_NIGHT = "#041a0b"       # coastlines in darkness
 NIGHT_START = 0.10           # where the transition starts (fraction of radius from centre, + is right)
 NIGHT_END = -0.15            # where the transition ends in full night (- is left)
-NIGHT_STEPS = 14             # number of gradient steps
+NIGHT_STEPS = 14             # number of steps used to colour objects (satellites, city lights)
+NIGHT_DARKNESS = 0.94        # how dark the night side gets (0 = not at all, 1 = pitch black)
 
 # --- Atmosphere ---
 ATMO_COLOR = "#4aa8ff"       # atmosphere colour
 ATMO_WIDTH = 28              # halo thickness above the surface (pixels)
-ATMO_RINGS = 12              # number of halo layers (more = smoother)
 ATMO_STRENGTH = 0.40         # brightness near the surface (0..1)
 ATMO_NIGHT = 0.06            # fraction of brightness left on the night side
 
@@ -36,9 +41,9 @@ CLOUD_SYSTEMS = 15           # number of cloud clusters
 CLOUD_HALO = "#c3d3e6"       # soft cloud edge
 CLOUD_SHADOW = "#9fb2cb"     # grey-blue shadow underneath
 CLOUD_BODY = "#f4f8fc"       # bright white top
-CLOUD_BODY_NIGHT = "#131415"  # cloud top at night (neutral grey)
-CLOUD_SHADOW_NIGHT = "#0a0b0c"
-CLOUD_HALO_NIGHT = "#070809"
+CLOUD_VERTS = 10             # vertices per puff (fewer = faster)
+CLOUD_CS = [(math.cos(2 * math.pi * v / CLOUD_VERTS), math.sin(2 * math.pi * v / CLOUD_VERTS))
+            for v in range(CLOUD_VERTS)]
 CLOUD_SCALE = 1.012          # clouds sit slightly above the surface
 CLOUD_DRIFT = 1.15           # clouds rotate slightly faster than the surface
 
@@ -66,6 +71,7 @@ def make_satellites():
 
 SATELLITES = make_satellites()
 SAT_TRAIL = 14               # trail length (number of segments)
+TRAIL_GROUPS = 4              # a trail is drawn as this many polylines of decreasing brightness
 SAT_TRAIL_STEP = 0.05        # angle between trail points (rad)
 SAT_BODY, SAT_BODY_NIGHT = "#eef3f8", "#7d8590"      # body: day -> night
 SAT_PANEL, SAT_PANEL_NIGHT = "#6fa8ff", "#2c4a75"    # solar panels
@@ -213,6 +219,8 @@ def densify(poly):
 
 
 LAND = [densify(p) for p in CONTINENTS.values()]
+# precomputed (cos lat, sin lat, sin lon, cos lon) for every vertex: rotating is then plain multiplication
+LAND_T = [[(math.cos(la), math.sin(la), math.sin(lo), math.cos(lo)) for la, lo in poly] for poly in LAND]
 
 def lerp_color(c1, c2, t):
     a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
@@ -221,30 +229,139 @@ def lerp_color(c1, c2, t):
 
 
 N = NIGHT_STEPS
-OCEAN_SHADES = [lerp_color(OCEAN, OCEAN_NIGHT, k / N) for k in range(N + 1)]
-LAND_SHADES = [lerp_color(LAND_FILL, LAND_NIGHT, k / N) for k in range(N + 1)]
-EDGE_SHADES = [lerp_color(LAND_EDGE, EDGE_NIGHT, k / N) for k in range(N + 1)]
-# gradient band edges (pixels): from NIGHT_START to NIGHT_END
-BAND_X = [(NIGHT_START + (NIGHT_END - NIGHT_START) * k / N) * RADIUS for k in range(1, N + 1)]
-CIRCLE = [(RADIUS * math.cos(2 * math.pi * i / 120), RADIUS * math.sin(2 * math.pi * i / 120))
-          for i in range(120)]
 
 
-def make_ring(radius, a):
-    """Atmosphere ring: polygon + shades from day to night (darkening on the night side)."""
-    poly = [(radius * math.cos(2 * math.pi * i / 120), radius * math.sin(2 * math.pi * i / 120))
-            for i in range(120)]
-    day = lerp_color(BG, ATMO_COLOR, a)
-    night = lerp_color(BG, ATMO_COLOR, a * ATMO_NIGHT)
-    return poly, [lerp_color(day, night, t / N) for t in range(N + 1)]
+def clamp01(v):
+    return 0.0 if v < 0 else 1.0 if v > 1 else v
 
 
-# from the largest (almost invisible) to the one closest to the surface (brightest)
-ATMO = [
-    make_ring(RADIUS + ATMO_WIDTH * (ATMO_RINGS - i) / ATMO_RINGS,
-              ATMO_STRENGTH * ((i + 1) / ATMO_RINGS) ** 2)
-    for i in range(ATMO_RINGS)
-]
+def darken(color):
+    """The colour as it looks in full night (what the black night shade turns it into)."""
+    return lerp_color(color, "#000000", NIGHT_DARKNESS)
+
+
+LAND_DARK, EDGE_DARK = darken(LAND_FILL), darken(LAND_EDGE)
+OCEAN_DARK = darken(OCEAN)
+CLOUD_HALO_DARK, CLOUD_SHADOW_DARK, CLOUD_BODY_DARK = darken(CLOUD_HALO), darken(CLOUD_SHADOW), darken(CLOUD_BODY)
+
+
+def night_factor(x):
+    """0 = day ... 1 = full night for a screen x (pixels), smooth S-curve across the transition."""
+    s = clamp01((NIGHT_START * RADIUS - x) / ((NIGHT_START - NIGHT_END) * RADIUS))
+    return s * s * (3 - 2 * s)
+
+
+def png_rgba(w, h, rows):
+    """Encodes RGBA rows (bytes) into a PNG - Tk can load it directly, no imaging library needed."""
+    raw = b"".join(b"\x00" + row for row in rows)
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 2)) + chunk(b"IEND", b""))
+
+
+def rgb(color):
+    return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
+
+
+ATMO_TILES = 32  # the atmosphere ring is split into this many small images (tiny pixel area for Tk to blend)
+XE = NIGHT_END * RADIUS    # left of this x it is full night (objects use plain dark colours there)
+XS = NIGHT_START * RADIUS  # right of this x it is full day
+
+
+def make_atmo_tiles(k):
+    """Atmosphere glow as a ring of small RGBA images (day side bright, night side dimmed).
+    Returns [(screen_x, screen_y, png), ...]. Small tiles keep the blended pixel area low."""
+    r_out = RADIUS + ATMO_WIDTH
+    r_in = RADIUS - 1.5 / k
+    inv = 1.0 / k
+    ar, ag, ab = rgb(ATMO_COLOR)
+    two_pi = 2 * math.pi
+    atan2, hypot, floor, ceil = math.atan2, math.hypot, math.floor, math.ceil
+    tiles = []
+    for t in range(ATMO_TILES):
+        a0, a1 = two_pi * t / ATMO_TILES, two_pi * (t + 1) / ATMO_TILES
+        corners = [(r * math.cos(a), r * math.sin(a)) for r in (r_in, r_out) for a in (a0, a1)]
+        for q in range(4):                                   # axis extremes that fall inside the sector
+            a = q * math.pi / 2
+            if a0 < a < a1:
+                corners.append((r_out * math.cos(a), r_out * math.sin(a)))
+        if max(c[0] for c in corners) <= XE:
+            continue  # deep in the night the glow is almost invisible - skip the whole tile
+        x0 = floor(min(c[0] for c in corners) * k) - 1
+        x1 = ceil(max(c[0] for c in corners) * k) + 1
+        y0 = floor(min(c[1] for c in corners) * k) - 1
+        y1 = ceil(max(c[1] for c in corners) * k) + 1
+        zero4 = bytes(4)
+        rows = []
+        for py in range(y1 - y0):
+            sy = y0 + py + 0.5
+            row = []
+            for px in range(x1 - x0):
+                sx = x0 + px + 0.5
+                r = hypot(sx, sy) * inv
+                if r < r_in or r > r_out:
+                    row.append(zero4)
+                    continue
+                theta = atan2(sy, sx) % two_pi
+                if not (a0 <= theta < a1):
+                    row.append(zero4)
+                    continue
+                tt = (r_out - r) / ATMO_WIDTH
+                glow = 1 - (1 - ATMO_NIGHT) * night_factor(sx * inv)
+                row.append(bytes((ar, ag, ab, int(ATMO_STRENGTH * tt * tt * glow * 255 + 0.5))))
+            rows.append(b"".join(row))
+        tiles.append((x0, y0, png_rgba(x1 - x0, y1 - y0, rows)))
+    return tiles
+
+
+def make_night_strip(k):
+    """The gradient only: a black image whose alpha ramps up across the day/night transition, masked to the
+    globe disc. Deep night is drawn with plain dark colours, so this image stays narrow."""
+    r_o = RADIUS + 0.8  # just the globe disc (a wider mask would darken a sliver of sky outside the limb)
+    inv = 1.0 / k
+    x0 = int(math.ceil(NIGHT_END * RADIUS * k))  # the strip starts on a pixel boundary, right of the old XE
+    width = int(math.ceil(XS * k)) - x0 + 1
+    top = int(math.ceil(r_o * k)) + 1
+    height = 2 * top
+    alpha = [int(255 * NIGHT_DARKNESS * night_factor((x0 + px + 0.5) * inv) + 0.5) for px in range(width)]
+    col4 = [bytes((0, 0, 0, a)) for a in alpha]
+    zero4 = bytes(4)
+    sqrt = math.sqrt
+
+    def edge(px, dy2):
+        dx = (x0 + px + 0.5) * inv
+        c = clamp01((r_o - sqrt(dx * dx + dy2)) * k + 0.5)   # anti-aliased limb
+        return bytes((0, 0, 0, int(alpha[px] * c + 0.5)))
+
+    rows = []
+    for py in range(height):
+        dy = (py + 0.5 - top) * inv
+        dy2 = dy * dy
+        wo2 = (r_o + inv) ** 2 - dy2
+        if wo2 <= 0:
+            rows.append(zero4 * width)
+            continue
+        wo = sqrt(wo2)
+        b1 = max(0, int(math.ceil(-wo * k - 0.5)) - x0)
+        b2 = min(width, int(math.floor(wo * k - 0.5)) - x0 + 1)
+        wi2 = (r_o - 1.5 * inv) ** 2 - dy2
+        if wi2 > 0:
+            wi = sqrt(wi2)
+            a1 = min(max(b1, int(math.ceil(-wi * k - 0.5)) - x0), b2)
+            a2 = max(a1, min(b2, int(math.floor(wi * k - 0.5)) - x0 + 1))
+        else:
+            a1 = a2 = (b1 + b2) // 2
+        parts = [zero4 * b1]
+        parts += [edge(px, dy2) for px in range(b1, a1)]
+        parts.append(b"".join(col4[a1:a2]))
+        parts += [edge(px, dy2) for px in range(a2, b2)]
+        parts.append(zero4 * (width - b2))
+        rows.append(b"".join(parts))
+    return x0, top, width, height, png_rgba(width, height, rows)
+
 
 CLOUD_RNG = random.Random(11)
 CLOUD_GONE = math.radians(100)  # azimuth beyond which the whole system is already past the right horizon
@@ -281,16 +398,18 @@ def make_cloud_system(cloud_rot, center_az=None):
     center_lon = az_deg - math.degrees(cloud_rot)
 
     built = []
+    lon_min = 1e9
     for lat0, dlon, r in puffs:
-        lon0 = center_lon + dlon
-        k = max(0.35, math.cos(math.radians(lat0)))
-        poly = []
-        for v in range(14):
-            ang = 2 * math.pi * v / 14
-            poly.append((math.radians(lat0 + r * math.sin(ang)),
-                         math.radians(lon0 + r * math.cos(ang) * 1.15 / k)))
-        built.append((poly, (math.radians(lat0), math.radians(lon0))))
-    return {"puffs": built, "min_lon": min(p[1][1] for p in built)}
+        lon_rad = math.radians(center_lon + dlon)
+        phi = math.radians(lat0)
+        cphi = math.cos(phi)
+        k = max(0.35, cphi)
+        # a puff is an ellipse in the tangent plane at its centre: semi-axes towards east / north (radians)
+        a_east = math.radians(r * 1.15 * cphi / k)
+        a_north = math.radians(r)
+        built.append((cphi, math.sin(phi), math.sin(lon_rad), math.cos(lon_rad), a_east, a_north))
+        lon_min = min(lon_min, lon_rad - a_east / k)
+    return {"puffs": built, "min_lon": lon_min}
 
 
 # initial set: systems scattered over the visible part and behind the left horizon
@@ -308,9 +427,6 @@ def update_clouds(cloud_rot):
             CLOUD_LIST[i] = make_cloud_system(cloud_rot)
             spawned.append(CLOUD_LIST[i])
     return spawned
-HALO_SHADES = [lerp_color(CLOUD_HALO, CLOUD_HALO_NIGHT, t / N) for t in range(N + 1)]
-SHADOW_SHADES = [lerp_color(CLOUD_SHADOW, CLOUD_SHADOW_NIGHT, t / N) for t in range(N + 1)]
-BODY_SHADES = [lerp_color(CLOUD_BODY, CLOUD_BODY_NIGHT, t / N) for t in range(N + 1)]
 
 
 STAR_WORLD = 1300            # half-size of the star "universe" (for large screens)
@@ -449,7 +565,9 @@ def make_city_lights():
                                rnd.uniform(0.6, 1.0), False))
         for la, lo, size, core in candidates:
             if in_land(la, lo):
-                dots.append((math.radians(la), math.radians(lo), size, core, rnd.uniform(0, 2 * math.pi)))
+                la, lo = math.radians(la), math.radians(lo)
+                dots.append((math.cos(la), math.sin(la), math.sin(lo), math.cos(lo), size, core,
+                             rnd.uniform(0, 2 * math.pi)))
     return dots
 
 
@@ -465,11 +583,30 @@ screen.bgcolor(BG)
 screen.title("Обертовий глобус  —  F або подвійний клік: повний екран, Esc: вийти")
 screen.tracer(0)
 cv = screen.getcanvas()  # draw directly on the tkinter canvas - faster than turtle
+_tcl, _cw = cv.tk.call, cv._canvas._w
+
+
+def tk_poly(flat, color):
+    """Filled polygon via a direct Tcl call (about 2x cheaper than cv.create_polygon, which parses options)."""
+    _tcl(_cw, "create", "polygon", *flat, "-fill", color, "-outline", "")
+
+
+def line(flat, color, width):
+    _tcl(_cw, "create", "line", *flat, "-fill", color, "-width", width)
+
+
+def rect(x0, y0, x1, y1, color):
+    _tcl(_cw, "create", "rectangle", x0, y0, x1, y1, "-fill", color, "-outline", "")
 root = cv.winfo_toplevel()
 fullscreen = False
 last_size = None
+quality = 0          # 0 = everything ... 3 = minimal (only ever goes down; resets when the window size changes)
+frame_avg = None     # smoothed real frame interval (ms)
+quality_wait = 0     # frames to wait after a change before judging again
+static_k = None   # scale the static layer was built for (None = not built yet)
+static_imgs = []  # keeps the PhotoImage objects alive
 last_time = None
-MAX_STEPS = 4.0  # after a pause (e.g. dragging the window) the animation never jumps by more than 4 frames
+MAX_STEPS = 4.0  # after a pause (e.g. dragging the window) the animation never jumps by more than 4 steps
 
 
 def set_fullscreen(on):
@@ -508,6 +645,9 @@ def fit_to_window():
 angle = 0.0
 
 
+CT, ST = math.cos(TILT), math.sin(TILT)
+
+
 def project(lat, lon, rot):
     """Point on the sphere -> (x, y, z) after rotation about the axis and tilt."""
     x = math.cos(lat) * math.sin(lon + rot)
@@ -533,27 +673,31 @@ def clip_left(poly, x_max):
     return out
 
 
+def clip_right(poly, x_min):
+    """Clips a 2D polygon with the half-plane x >= x_min (mirror of clip_left)."""
+    return [(-x, y) for x, y in clip_left([(-x, y) for x, y in poly], -x_min)]
+
+
+def fill_split(poly, day, night):
+    """Fills a polygon with its day colour, or its night colour left of the full-night line XE
+    (a polygon crossing XE is split in two). The gradient between day and night comes from the shade strip."""
+    xs = [p[0] for p in poly]
+    if min(xs) >= XE:
+        fill(poly, day)
+    elif max(xs) <= XE:
+        fill(poly, night)
+    else:
+        fill(clip_left(poly, XE), night)
+        fill(clip_right(poly, XE), day)
+
+
 def fill(poly, color):
     if len(poly) >= 3:
         flat = []
         for x, y in poly:
             flat.append(x)
             flat.append(-y)
-        cv.create_polygon(flat, fill=color, outline="")
-
-
-def fill_night(poly, shades):
-    """Draws a polygon in its day colour, then darker bands on the left on top (night gradient)."""
-    fill(poly, shades[0])
-    shape = poly
-    drawn = shades[0]
-    for k, x_max in enumerate(BAND_X, start=1):
-        shape = clip_left(shape, x_max)
-        if len(shape) < 3:
-            break
-        if shades[k] != drawn:  # a band of the same colour as the one below changes nothing - skip it
-            fill(shape, shades[k])
-            drawn = shades[k]
+        tk_poly(flat, color)
 
 
 def night_level(x):
@@ -564,9 +708,17 @@ def night_level(x):
 
 def draw_land(rot):
     """Fill and outlines of the continents on the visible hemisphere."""
-    for poly in LAND:
-        pts = [project(lat, lon, rot) for lat, lon in poly]
-        if all(p[2] < 0 for p in pts):
+    cr, sr = math.cos(rot), math.sin(rot)
+    for poly in LAND_T:
+        pts = []
+        front = False
+        for cl, sl, slon, clon in poly:
+            z0 = cl * (clon * cr - slon * sr)
+            z = sl * ST + z0 * CT
+            pts.append((cl * (slon * cr + clon * sr) * RADIUS, (sl * CT - z0 * ST) * RADIUS, z))
+            if z >= 0:
+                front = True
+        if not front:
             continue  # continent is entirely on the far side
 
         # fill: far-side points are clamped to the edge of the disc
@@ -576,26 +728,59 @@ def draw_land(rot):
                 d = math.hypot(x, y) or 1.0
                 x, y = x / d * RADIUS, y / d * RADIUS
             flat.append((x, y))
-        fill_night(flat, LAND_SHADES)
+        fill_split(flat, LAND_FILL, LAND_DARK)
 
-        # outline: only where both points are on the near hemisphere
+        # outline: only where both points are on the near hemisphere; one polyline per continuous stretch
+        # of the same side of the full-night line (day colour / night colour)
         n = len(pts)
+        run, run_night = None, False
         for i in range(n):
             x1, y1, z1 = pts[i]
             x2, y2, z2 = pts[(i + 1) % n]
             if z1 >= 0 and z2 >= 0:
-                cv.create_line(x1, -y1, x2, -y2,
-                               fill=EDGE_SHADES[night_level((x1 + x2) / 2)], width=1.4)
+                night = (x1 + x2) < 2 * XE
+                if run is not None and night != run_night:
+                    line(run, EDGE_DARK if run_night else LAND_EDGE, 1.4)
+                    run = [x1, -y1]
+                if run is None:
+                    run = [x1, -y1]
+                run_night = night
+                run += [x2, -y2]
+            elif run is not None:
+                line(run, EDGE_DARK if run_night else LAND_EDGE, 1.4)
+                run = None
+        if run is not None:
+            line(run, EDGE_DARK if run_night else LAND_EDGE, 1.4)
 
 
-def draw_stars():
+star_items = []      # (canvas item, x, y, size, colour, phase, speed) in screen pixels
+STAR_UPDATE_EVERY = 6  # twinkling changes slowly, so stars are updated every few frames only
+last_star_tick = -100.0
+
+
+def build_stars(k):
+    """Stars are persistent canvas items (created with the static layer) - they cost nothing between updates."""
+    star_items.clear()
     for x, y, size, color, phase, speed in STARS:
         if abs(x) > view_hw or abs(y) > view_hh:
             continue  # outside the visible area (relevant for fullscreen)
+        item = cv.create_oval((x - size) * k, (-y - size) * k, (x + size) * k, (-y + size) * k,
+                              fill=color, outline="", tags=("static", "stars"))
+        star_items.append((item, x * k, -y * k, size * k, color, phase, speed))
+
+
+def update_stars():
+    global last_star_tick
+    if quality >= 1:
+        return  # no twinkling on a slow machine
+    if tick - last_star_tick < STAR_UPDATE_EVERY:
+        return
+    last_star_tick = tick
+    for item, x, y, size, color, phase, speed in star_items:
         b = 1 - STAR_TWINKLE * (0.5 + 0.5 * math.sin(tick * speed + phase))  # 1 = brightest, 0 = almost faded out
         r = size * (0.7 + 0.3 * b)  # the star "breathes" slightly along with its brightness
-        cv.create_oval(x - r, -y - r, x + r, -y + r,
-                       fill=lerp_color(BG, color, 0.06 + 0.94 * b), outline="")
+        cv.coords(item, x - r, y - r, x + r, y + r)
+        cv.itemconfigure(item, fill=lerp_color(BG, color, 0.06 + 0.94 * b))
 
 
 def scaled(pts, mx, my, k, dy):
@@ -604,10 +789,18 @@ def scaled(pts, mx, my, k, dy):
 
 def draw_cities(rot):
     """City lights: glow only on the night side, flicker slightly, hidden by clouds."""
-    for lat, lon, size, core, phase in CITY_LIGHTS:
-        x, y, z = project(lat, lon, rot)
+    if quality >= 3:
+        return
+    cr, sr = math.cos(rot), math.sin(rot)
+    for cl, sl, slon, clon, size, core, phase in CITY_LIGHTS:
+        if quality >= 2 and not core:
+            continue  # only the main light of each city
+        z0 = cl * (clon * cr - slon * sr)
+        z = sl * ST + z0 * CT
         if z < 0.08:
             continue  # beyond the horizon or too close to the edge
+        x = cl * (slon * cr + clon * sr) * RADIUS
+        y = (sl * CT - z0 * ST) * RADIUS
         depth = night_level(x) / N
         glow = (depth - CITY_VISIBLE_FROM) / (1 - CITY_VISIBLE_FROM)
         if glow <= 0:
@@ -618,9 +811,8 @@ def draw_cities(rot):
             continue
         b = size * (0.6 + 0.4 * z)
         if core:  # soft glow around the city centre
-            cv.create_rectangle(x - b * 1.9, -y - b * 1.9, x + b * 1.9, -y + b * 1.9,
-                                fill=CITY_SHADES[max(1, idx // 3)], outline="")
-        cv.create_rectangle(x - b, -y - b, x + b, -y + b, fill=CITY_SHADES[idx], outline="")
+            rect(x - b * 1.9, -y - b * 1.9, x + b * 1.9, -y + b * 1.9, CITY_SHADES[max(1, idx // 3)])
+        rect(x - b, -y - b, x + b, -y + b, CITY_SHADES[idx])
 
 
 def draw_satellites(front):
@@ -636,14 +828,24 @@ def draw_satellites(front):
                         r * (c * u[1] + sn * v[1]),
                         r * (c * u[2] + sn * v[2])))
 
-        # trail: segments fade out to the background colour
-        for j in range(SAT_TRAIL):
+        # trail: a few polylines that fade out to the background colour (not one item per step)
+        group, run = -1, None
+        for j in range(0 if quality >= 2 else SAT_TRAIL):
             (x1, y1, z1), (x2, y2, z2) = pts[j], pts[j + 1]
             if ((z1 + z2) >= 0) != front:
+                if run:
+                    line(run, run_color, 2)
+                run, group = None, -1
                 continue
-            base = SAT_TRAIL_SHADES[night_level((x1 + x2) / 2)]
-            fade = 1.0 * (1 - j / SAT_TRAIL)
-            cv.create_line(x1, -y1, x2, -y2, fill=lerp_color(BG, base, fade), width=2)
+            g = j * TRAIL_GROUPS // SAT_TRAIL
+            if run is None or g != group:
+                if run:
+                    line(run, run_color, 2)
+                run, group = [x1, -y1], g
+                run_color = lerp_color(BG, SAT_TRAIL_SHADES[night_level((x1 + x2) / 2)], 1 - (g + 0.5) / TRAIL_GROUPS)
+            run += [x2, -y2]
+        if run:
+            line(run, run_color, 2)
 
         # body with two solar panels
         x, y, z = pts[0]
@@ -699,95 +901,127 @@ def draw_iss(front):
 
 
 def draw_clouds(rot):
-    """Fluffy clouds: soft edge, shadow underneath, white top; they darken at night along with the surface."""
+    """Fluffy clouds: soft edge, shadow underneath, white top; they darken at night along with the surface.
+    Each puff is projected once (its centre); its outline is then laid out with the local east/north
+    directions, which also gives the foreshortening near the limb for free."""
     rot = tick * SPEED * CLOUD_DRIFT  # does not reset after a full revolution
     update_clouds(rot)
-    all_puffs = [puff for system in CLOUD_LIST for puff in system["puffs"]]
-    limit = RADIUS * CLOUD_SCALE
+    if quality >= 3:
+        return
+    cr, sr = math.cos(rot), math.sin(rot)
+    scale = RADIUS * CLOUD_SCALE
     puffs = []
-    for poly, (clat, clon) in all_puffs:
-        cx, cy, cz = project(clat, clon, rot)
-        if cz < 0.12:
-            continue  # centre is too close to the edge or beyond the horizon
-        lvl = night_level(cx * CLOUD_SCALE)
-        pts = []
-        for lat, lon in poly:
-            x, y, z = project(lat, lon, rot)
-            x, y = x * CLOUD_SCALE, y * CLOUD_SCALE
-            if z < 0:
-                d = math.hypot(x, y) or 1.0
-                x, y = x / d * limit, y / d * limit
-            pts.append((x, y))
-        mx = sum(p[0] for p in pts) / len(pts)
-        my = sum(p[1] for p in pts) / len(pts)
-        hy = (max(p[1] for p in pts) - min(p[1] for p in pts)) / 2
-        puffs.append((pts, mx, my, hy, min(N, round(lvl * 1.35))))  # clouds darken faster than the surface
+    for system in CLOUD_LIST:
+        for cphi, sphi, slon, clon, a_east, a_north in system["puffs"]:
+            sl = slon * cr + clon * sr          # sin(lon + rot)
+            cl = clon * cr - slon * sr          # cos(lon + rot)
+            if sphi * ST + cphi * cl * CT < 0.12:
+                continue  # centre is too close to the edge or beyond the horizon
+            # screen directions of "east" and "north" at the puff, scaled by the semi-axes
+            ax, ay = a_east * cl * scale, a_east * sl * ST * scale
+            bx, by = -a_north * sphi * sl * scale, a_north * (cphi * CT + sphi * cl * ST) * scale
+            puffs.append((cphi * sl * scale, (sphi * CT - cphi * cl * ST) * scale, ax, ay, bx, by,
+                          math.sqrt(ay * ay + by * by), math.sqrt(ax * ax + bx * bx)))
 
+    if quality >= 2:
+        puffs = puffs[::2]
     # draw each layer for all puffs together so they merge into a single cloud
-    for pts, mx, my, hy, lvl in puffs:
-        fill(scaled(pts, mx, my, 1.3, 0), HALO_SHADES[lvl])
-    for pts, mx, my, hy, lvl in puffs:
-        fill(scaled(pts, mx, my, 1.0, -0.18 * hy), SHADOW_SHADES[lvl])
-    for pts, mx, my, hy, lvl in puffs:
-        fill(scaled(pts, mx, my, 0.88, 0.14 * hy), BODY_SHADES[lvl])
-
-
-static_k = None
-
-
-ATMO_SECTORS = 240  # number of arcs each atmosphere ring is split into
+    cs = CLOUD_CS
+    layers = ((1.3, 0.0, CLOUD_HALO, CLOUD_HALO_DARK),
+              (1.0, -0.18, CLOUD_SHADOW, CLOUD_SHADOW_DARK),
+              (0.88, 0.14, CLOUD_BODY, CLOUD_BODY_DARK))
+    for f, shift, day, night in (layers[1:] if quality >= 1 else layers):
+        for cx, cy, ax, ay, bx, by, hy, hx in puffs:
+            fax, fbx, fay, fby = f * ax, f * bx, f * ay, f * by
+            ym = -(cy + shift * hy)
+            flat = [0.0] * (2 * CLOUD_VERTS)
+            flat[0::2] = [cx + fax * c + fbx * s for c, s in cs]
+            flat[1::2] = [ym - fay * c - fby * s for c, s in cs]
+            if cx - f * hx >= XE:
+                tk_poly(flat, day)
+            elif cx + f * hx <= XE:
+                tk_poly(flat, night)
+            else:  # crosses the full-night line: split in two
+                pts = [(flat[i], -flat[i + 1]) for i in range(0, len(flat), 2)]
+                fill(clip_left(pts, XE), night)
+                fill(clip_right(pts, XE), day)
 
 
 def build_static(k):
-    """Draws the layer that does not change between frames (atmosphere and ocean) and tags it "static".
-
-    The atmosphere is thin rings made of arcs (no large filled areas, so Tk draws them quickly);
-    the colour of each arc depends on its position relative to the night boundary.
-    """
-    global static_k
+    """Builds the layers that do not change between frames and tags them "static":
+    atmosphere tiles, the ocean (a plain oval + its dark part) and the narrow night-gradient strip."""
+    global static_k, static_imgs, last_star_tick, XE
     cv.delete("all")
-    thick = ATMO_WIDTH / ATMO_RINGS
-    step = 360.0 / ATMO_SECTORS
-    for i, (poly, shades) in enumerate(ATMO):
-        r_mid = RADIUS + ATMO_WIDTH * (ATMO_RINGS - i - 0.5) / ATMO_RINGS
-        rk = r_mid * k
-        for j in range(ATMO_SECTORS):
-            theta = j * step
-            x = r_mid * math.cos(math.radians(theta + step / 2))
-            cv.create_arc(-rk, -rk, rk, rk, start=theta, extent=step + 0.8, style="arc",
-                          outline=shades[night_level(x)], width=thick * k + 0.8)
-    cv.addtag_all("static")
-    fill_night(CIRCLE, OCEAN_SHADES)  # ocean
-    cv.addtag_all("ocean")
-    cv.dtag("static", "ocean")
-    if k != 1.0:
-        cv.scale("ocean", 0, 0, k, k)
-    cv.addtag_withtag("static", "ocean")
+    static_imgs = []
+    build_stars(k)  # stars go first = they are at the very bottom
+    last_star_tick = -100.0
+    for x0, y0, png in make_atmo_tiles(k):
+        img = tkinter.PhotoImage(master=root, data=base64.b64encode(png))
+        static_imgs.append(img)
+        cv.create_image(x0, y0, image=img, anchor="nw", tags=("static", "atmo"))
+    r = RADIUS * k
+    cv.create_oval(-r, -r, r, r, fill=OCEAN, outline="", tags="static")
+    circle = [(RADIUS * math.cos(2 * math.pi * i / 360), RADIUS * math.sin(2 * math.pi * i / 360)) for i in range(360)]
+    x0, top, width, height, png = make_night_strip(k)
+    XE = x0 / k  # from now on the "full night" line is exactly where the strip begins: land, clouds and the
+    #              dark ocean all switch to night colours on the same pixel column (no seam, no double darkening)
+    dark = clip_left(circle, XE)
+    cv.create_polygon([c * k for p in dark for c in (p[0], -p[1])], fill=OCEAN_DARK, outline="", tags="static")
+    img = tkinter.PhotoImage(master=root, data=base64.b64encode(png))
+    static_imgs.append(img)
+    cv.create_image(x0, -top, image=img, anchor="nw", tags=("static", "shade"))
     static_k = k
 
 
+def apply_quality():
+    """Level 1: no cloud halo, no star twinkle. 2: half the clouds, no satellite trails, only the main city
+    lights, no atmosphere glow. 3: no clouds, no city lights, no stars."""
+    cv.itemconfigure("atmo", state="hidden" if quality >= 2 else "normal")
+    cv.itemconfigure("stars", state="hidden" if quality >= 3 else "normal")
+
+
+def adapt_quality(interval_ms):
+    """Watches the real frame interval and, if the machine cannot keep up, lowers the quality one level."""
+    global quality, frame_avg, quality_wait
+    if not AUTO_QUALITY or quality >= 3:
+        return
+    frame_avg = interval_ms if frame_avg is None else 0.9 * frame_avg + 0.1 * interval_ms
+    quality_wait -= 1
+    if quality_wait <= 0 and frame_avg > 1000.0 / QUALITY_MIN_FPS:
+        quality += 1
+        quality_wait = 90
+        frame_avg = None
+        apply_quality()
+
+
 def draw_frame():
-    global angle, tick, last_time
+    global angle, tick, last_time, quality, frame_avg, quality_wait
     started = time.perf_counter()
+    if last_time is not None and started - last_time < 0.5:
+        adapt_quality((started - last_time) * 1000)
     # animation depends on real time, not on the frame count:
     # rotation speed is the same in a window and in fullscreen (where frames take longer to draw)
-    steps = 1.0 if last_time is None else min(MAX_STEPS, (started - last_time) * 1000 / FRAME_MS)
+    steps = 1.0 if last_time is None else min(MAX_STEPS, (started - last_time) * 1000 / TICK_MS)
     last_time = started
     global static_k
     k = fit_to_window()
     if k != static_k:
-        build_static(k)               # static layer (atmosphere and ocean) is drawn once and again on resize
+        if static_k is not None:   # window size changed: judge the quality again from scratch
+            quality, frame_avg, quality_wait = 0, None, 60
+        build_static(k)
+        apply_quality()               # static layer (atmosphere and ocean) is drawn once and again on resize
     else:
         cv.delete("dyn")              # the rest of the frame is redrawn every time
-    draw_stars()                      # background stars
+    update_stars()                    # twinkle the (persistent) background stars
     draw_satellites(front=False)      # satellites behind the Earth
     draw_iss(front=False)             # ISS when it is behind the Earth
     cv.addtag_all("behind")           # everything behind the Earth is lowered beneath the static layer (atmosphere and ocean)
     cv.dtag("static", "behind")
     cv.tag_lower("behind")
     draw_land(angle)                  # continents
-    draw_cities(angle)                # city lights on the night side
     draw_clouds(angle)                # clouds
+    cv.tag_raise("shade")             # night shade over the land and clouds (city lights, satellites go above it)
+    draw_cities(angle)                # city lights on the night side
     draw_satellites(front=True)       # satellites in front of the Earth
     draw_iss(front=True)              # ISS in front of the Earth
 
@@ -799,7 +1033,7 @@ def draw_frame():
     angle = (angle + SPEED * steps) % (2 * math.pi)
     tick += steps
     spent = (time.perf_counter() - started) * 1000
-    screen.ontimer(draw_frame, max(1, int(FRAME_MS - spent)))  # keep ~40 frames/s if we can keep up
+    screen.ontimer(draw_frame, max(1, int(1000 / TARGET_FPS - spent)))  # aim for TARGET_FPS if we can keep up
 
 
 draw_frame()
