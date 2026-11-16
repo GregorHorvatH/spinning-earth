@@ -4,11 +4,12 @@ import random
 import struct
 import time
 import tkinter
+import tkinter.font
 import turtle
 import zlib
 
 # --- Settings ---
-WIDTH, HEIGHT = 700, 700
+WIDTH, HEIGHT = 700, 800
 RADIUS = 250
 TILT = math.radians(23.5)   # axial tilt of the globe
 SPEED = math.radians(0.3)   # rotation angle per frame
@@ -23,10 +24,11 @@ LAYERS = [
     ("clouds", "Clouds"),
     ("sats", "Satellites"),
     ("iss", "ISS"),
+    ("game", "Game (turtle, score)"),
 ]
 layer_on = {key: True for key, _ in LAYERS}  # current state of the checkboxes (cached, so frames never ask Tk)
 
-TICK_MS = 25                # animation time unit: SPEED, ISS_SPEED, etc. are "per 25 ms" (= 40 steps/s)
+TICK_MS = 25                # animation time unit: SPEED, PLAYER_SPEED, etc. are "per 25 ms" (= 40 steps/s)
 SHOW_PANEL = True           # show the control panel (FPS + layer checkboxes) at start; H hides / shows it
 AUTO_QUALITY = True         # on a slow machine, drop detail step by step until the animation runs smoothly
 QUALITY_WINDOW = 90        # the decision is the MEDIAN of this many recent frames, so a single hiccup never counts
@@ -69,7 +71,7 @@ STAR_COLORS = ["#ffffff", "#cfe0ff", "#fff1d0"]
 STAR_TWINKLE = 1.0           # brightness pulsing depth (0 - no pulsing, 1 - almost fade out)
 
 # --- Satellites ---
-SATELLITE_COUNT = 10         # number of satellites
+SATELLITE_COUNT = 10         # most ordinary satellites that can fly at once (the game adds one per level, up to this)
 SATELLITE_SEED = 5           # change the number to get a different set of orbits
 
 
@@ -94,9 +96,8 @@ SAT_PANEL, SAT_PANEL_NIGHT = "#6fa8ff", "#2c4a75"    # solar panels
 SAT_TRAIL_COLOR, SAT_TRAIL_NIGHT = "#8fb8ff", "#2f4560"  # trail
 
 # --- ISS (International Space Station) ---
-ISS_ORBIT = 1.15             # orbit radius in Earth radii (lower than the other satellites)
+ISS_ORBIT = 1.18             # orbit radius in Earth radii (one of the turtle's altitude steps)
 ISS_INCLINATION = 51.6       # orbit inclination to the equator, degrees (the real ISS inclination)
-ISS_SPEED = 0.026            # orbital speed, rad/frame
 ISS_PHASE = 0.8              # initial position on the orbit
 ISS_LABEL = ""               # label next to the station (e.g. "ISS"); empty string - no label
 ISS_SIZE = 1.35              # size of the station icon
@@ -105,6 +106,48 @@ ISS_BODY, ISS_BODY_NIGHT = "#f4f6f8", "#8f98a3"      # modules
 ISS_TRUSS, ISS_TRUSS_NIGHT = "#c9ced4", "#6c737c"    # truss
 ISS_PANEL, ISS_PANEL_NIGHT = "#e2ab3c", "#7d5f22"    # solar arrays
 ISS_TRAIL_COLOR = "#ffe7a6"
+
+# --- Game: fly the turtle and catch the ISS ---
+# One key press = one step; holding a key does NOT repeat it.
+# Left / Right turn the turtle's orbit by PLAYER_TURN_STEP (a plane change); Up / Down raise / lower it by PLAYER_ALT_STEP.
+CATCH_RADIUS = 30            # pixels: how close the turtle must get to the ISS to catch it
+PLAYER_SPEED = 0.020         # orbital speed of the turtle at the reference altitude (rad per step)
+PLAYER_REF_ALT = 1.22        # reference altitude, in Earth radii (the turtle starts here)
+PLAYER_ALT_RANGE = (1.10, 1.34)  # lowest / highest orbit the turtle can fly (Earth radii): 7 altitude levels
+PLAYER_TURN_STEP = math.radians(15)  # one Left / Right press turns the orbit by this angle
+PLAYER_ALT_STEP = 0.04       # one Up / Down press changes the altitude by this much (Earth radii)
+PLAYER_SIZE = 1.5            # size of the turtle
+GLOBE_GAP = 24               # minimum free pixels between the globe and the HUD plate above it and the window edge below it
+HUD_MARGIN = 32              # pixels between the score and the top / right edge of the picture (the same on both sides)
+PLAYER_COLOR, PLAYER_EDGE = "#3ddc84", "#e9fff2"              # the turtle by day: shell, outline
+PLAYER_COLOR_NIGHT, PLAYER_EDGE_NIGHT = "#04170b", "#0b3a1d"  # ... on the night side: dark green, almost black
+PLAYER_TRAIL, PLAYER_TRAIL_NIGHT = "#3f9f6a", "#0b3a1d"       # the trail behind the turtle: by day, and on the night side
+PLAYER_PATH = 1.5            # length of the dotted orbit prediction ahead of the turtle (rad)
+BUMP_RADIUS = 18             # pixels: a satellite this close knocks the turtle off its orbit
+BUMP_TURN = 0.30             # how far a hit turns the orbit (rad)
+BUMP_LEVELS = (1,)             # a hit pushes the turtle up or down by this many altitude steps
+BUMP_COOLDOWN = 45           # steps of immunity after a hit (the turtle blinks)
+ISS_ALT_RANGE = (1.12, 1.32)     # altitude of a newly spawned ISS (Earth radii); always one of the turtle's altitude steps
+
+# --- Difficulty: grows with every ISS you catch (level = score + 1) ---
+# Level 1: only the ISS, and it hardly moves. Every next level adds ONE ordinary satellite (up to SATELLITE_COUNT)
+# and makes the ISS faster. The ISS speed is a FRACTION of the turtle's own speed on the ISS's orbit, so it can never
+# overtake the turtle: it starts at ISS_SPEED_START, grows by a big step first (ISS_SPEED_FIRST_STEP), then by smaller
+# and smaller ones (each is ISS_SPEED_DECAY of the previous one, but never less than ISS_SPEED_MIN_STEP),
+# and stops at ISS_SPEED_MAX (the limit itself is 1.0 = the turtle's speed).
+ISS_SPEED_START = 0.05       # level 1: the station is almost standing still
+ISS_SPEED_FIRST_STEP = 0.20  # speed gained going from level 1 to level 2
+ISS_SPEED_DECAY = 0.70       # every next gain is this part of the previous one ...
+ISS_SPEED_MIN_STEP = 0.05    # ... but never smaller than this
+ISS_SPEED_MAX = 0.95         # the ISS never gets faster than this fraction of the turtle's speed on the same orbit
+# --- The caught ISS burns up in the atmosphere ---
+BURN_ANIMATION = True        # False: a caught station just disappears
+BURN_FALL = 0.45             # seconds the station falls (from the highest orbit; a lower one falls for less, down to BURN_FALL_MIN)
+BURN_FALL_MIN = 0.15         # seconds of falling from the lowest orbit
+BURN_FIRE = 0.45             # seconds it burns in the air
+BURN_DRIFT = 30              # pixels it drifts sideways along its orbit while falling (less for a slow station)
+BURN_END = 5                 # pixels above the surface where it is gone (with a flash)
+FORECAST_SECONDS = 15        # how far ahead the ETA / MIS instruments look
 
 # --- City lights on the night side ---
 CITY_COLOR = "#ffcf6e"       # colour of the lights
@@ -521,6 +564,319 @@ ISS_TRUSS_SHADES = [lerp_color(ISS_TRUSS, ISS_TRUSS_NIGHT, t / N) for t in range
 ISS_PANEL_SHADES = [lerp_color(ISS_PANEL, ISS_PANEL_NIGHT, t / N) for t in range(N + 1)]
 tick = 0
 view_hw, view_hh = WIDTH / 2, HEIGHT / 2  # visible area in "world" coordinates
+view_box = [-WIDTH / 2, -HEIGHT / 2, WIDTH / 2, HEIGHT / 2]  # the same area in screen pixels: left, top, right, bottom
+
+
+# ------------------------------------------------------------------ game logic
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _add(a, b):
+    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+
+def _sub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _mul(a, k):
+    return (a[0] * k, a[1] * k, a[2] * k)
+
+
+def _dist(a, b):
+    return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
+
+
+def orbit_basis(n):
+    """Two perpendicular unit vectors spanning the plane with normal n: position = r * (cos a * u + sin a * v)."""
+    n = _unit(n)
+    ref = (0.0, 1.0, 0.0) if abs(n[1]) < 0.9 else (1.0, 0.0, 0.0)
+    u = _unit(_cross(n, ref))
+    return u, _cross(n, u)
+
+
+def turtle_speed(alt):
+    """The turtle's orbital speed (rad per step) at altitude alt (Earth radii): lower orbits are faster (Kepler)."""
+    return PLAYER_SPEED * (PLAYER_REF_ALT / alt) ** 1.5
+
+
+def iss_speed_fraction(lvl):
+    """The ISS speed on level lvl as a fraction of the turtle's speed on the same orbit:
+    ISS_SPEED_START, then big steps that shrink (ISS_SPEED_FIRST_STEP * ISS_SPEED_DECAY ** n, at least
+    ISS_SPEED_MIN_STEP) until ISS_SPEED_MAX."""
+    fraction, step = ISS_SPEED_START, ISS_SPEED_FIRST_STEP
+    for _ in range(lvl - 1):
+        fraction = min(ISS_SPEED_MAX, fraction + step)
+        step = max(ISS_SPEED_MIN_STEP, step * ISS_SPEED_DECAY)
+    return fraction
+
+
+def iss_omega(alt, lvl):
+    """The ISS orbital speed (rad per step) at altitude alt (Earth radii) on level lvl."""
+    return iss_speed_fraction(lvl) * turtle_speed(alt)
+
+
+# the ISS is the game target: its orbit is replaced by a new random one every time it is caught
+iss = {"r": ISS_R, "u": ISS_U, "v": ISS_V, "omega": iss_omega(ISS_ORBIT, 1), "theta": ISS_PHASE}
+game_rng = random.Random()  # not seeded: every run gets different orbits
+score = 0
+
+
+def level():
+    """Game level = number of caught ISS + 1."""
+    return score + 1
+
+
+def active_satellites():
+    """How many ordinary satellites are flying: none on level 1, then one more per level (up to SATELLITE_COUNT).
+    With the game switched off all of them fly (the plain screensaver)."""
+    if not layer_on["game"]:
+        return len(ORBITS)
+    return min(len(ORBITS), level() - 1)
+_p0 = _unit((-0.55, -0.25, 0.8))
+player = {
+    "p": _p0,                                  # unit vector from the Earth's centre to the turtle
+    "t": _unit(_cross((0.0, 1.0, 0.0), _p0)),  # unit velocity direction (perpendicular to p)
+    "alt": PLAYER_REF_ALT,                     # orbit radius in Earth radii
+    "head": (1.0, 0.0),                        # last good on-screen heading (for drawing)
+    "hit": 0.0,                                # steps of immunity left after a collision
+    "wobble": 0.0,                             # steps of tumbling left after a collision
+}
+effects = []                                   # [x, y, age, colour] flashes (capture / collision)
+EFFECT_LIFE = 26.0
+WOBBLE_LIFE = 30.0
+keys_held = set()                              # arrow keys that are physically down right now
+
+
+def iss_pos():
+    c, s = math.cos(iss["theta"]), math.sin(iss["theta"])
+    r, u, v = iss["r"], iss["u"], iss["v"]
+    return (r * (c * u[0] + s * v[0]), r * (c * u[1] + s * v[1]), r * (c * u[2] + s * v[2]))
+
+
+def player_pos():
+    p, r = player["p"], player["alt"] * RADIUS
+    return (p[0] * r, p[1] * r, p[2] * r)
+
+
+def rotate_heading(p, t, angle):
+    """Turns the velocity direction t about the radial axis p. That is a plane change of the orbit.
+    angle > 0 turns left (seen from outside the globe), angle < 0 turns right."""
+    c, s = math.cos(angle), math.sin(angle)
+    w = _cross(p, t)
+    return _unit((t[0] * c + w[0] * s, t[1] * c + w[1] * s, t[2] * c + w[2] * s))
+
+
+def alt_levels():
+    """All altitudes the turtle can fly (Earth radii): PLAYER_ALT_RANGE in steps of PLAYER_ALT_STEP."""
+    lo, hi = PLAYER_ALT_RANGE
+    return [lo + i * PLAYER_ALT_STEP for i in range(int(round((hi - lo) / PLAYER_ALT_STEP)) + 1)]
+
+
+def iss_altitudes():
+    """The altitudes a new ISS can appear at: the turtle's steps inside ISS_ALT_RANGE (so they can be matched exactly)."""
+    lo, hi = ISS_ALT_RANGE
+    return [a for a in alt_levels() if lo - 1e-9 <= a <= hi + 1e-9]
+
+
+def turn_player(sign):
+    """One Left (+1) / Right (-1) press: turns the orbit by PLAYER_TURN_STEP."""
+    pl = player
+    pl["t"] = rotate_heading(pl["p"], pl["t"], sign * PLAYER_TURN_STEP)
+
+
+def climb_player(sign):
+    """One Up (+1) / Down (-1) press: moves the orbit one altitude step up / down (snapped to the altitude grid)."""
+    lo, hi = PLAYER_ALT_RANGE
+    level = int(round((player["alt"] - lo) / PLAYER_ALT_STEP)) + sign
+    player["alt"] = min(hi, max(lo, lo + level * PLAYER_ALT_STEP))
+
+
+def spawn_iss(avoid):
+    """Puts the ISS on a new random orbit, at least ~170 px away from the point `avoid` (the turtle)."""
+    rnd = game_rng
+    for _ in range(40):
+        u, v = orbit_basis((rnd.gauss(0, 1), rnd.gauss(0, 1), rnd.gauss(0, 1)))
+        alt = rnd.choice(iss_altitudes())
+        r = alt * RADIUS
+        theta = rnd.uniform(0, 2 * math.pi)
+        c, s = math.cos(theta), math.sin(theta)
+        pos = (r * (c * u[0] + s * v[0]), r * (c * u[1] + s * v[1]), r * (c * u[2] + s * v[2]))
+        if _dist(pos, avoid) > 170:
+            break
+    iss.update(r=r, u=u, v=v, omega=iss_omega(alt, level()), theta=theta)
+
+
+def satellite_positions():
+    """Positions of the ordinary satellites that are flying right now (see active_satellites)."""
+    out = []
+    for r, u, v, omega, phase in ORBITS[:active_satellites()]:
+        c, s = math.cos(phase + omega * tick), math.sin(phase + omega * tick)
+        out.append((r * (c * u[0] + s * v[0]), r * (c * u[1] + s * v[1]), r * (c * u[2] + s * v[2])))
+    return out
+
+
+def activate_satellite(index, avoid):
+    """A new level brings satellite number `index`: it appears on its own orbit, but never right on top of the
+    turtle (its position on the orbit is re-rolled until it is more than 160 px away from `avoid`)."""
+    r, u, v, omega, phase = ORBITS[index]
+    for _ in range(80):
+        phase = game_rng.uniform(0, 2 * math.pi)
+        c, s = math.cos(phase + omega * tick), math.sin(phase + omega * tick)
+        pos = (r * (c * u[0] + s * v[0]), r * (c * u[1] + s * v[1]), r * (c * u[2] + s * v[2]))
+        if _dist(pos, avoid) > 160:
+            break
+    ORBITS[index] = (r, u, v, omega, phase)
+    effects.append([pos[0], pos[1], 0.0, "#8fb8ff"])  # a blue ring marks where it appeared
+
+
+def bump_player(sat):
+    """A satellite hit: the orbit is knocked slightly off - the velocity turns away from the satellite and
+    the altitude changes a little (away from the satellite's altitude)."""
+    pl = player
+    p, t = pl["p"], pl["t"]
+    rel = _sub(sat, player_pos())
+    side = _dot(_cross(p, t), rel)                      # > 0: the satellite is on the turtle's left
+    if abs(side) < 1e-6:
+        side = game_rng.choice((-1.0, 1.0))
+    pl["t"] = rotate_heading(p, t, -math.copysign(BUMP_TURN * game_rng.uniform(0.7, 1.3), side))
+    pushed_down = math.sqrt(_dot(sat, sat)) > pl["alt"] * RADIUS
+    for _ in range(game_rng.choice(BUMP_LEVELS)):
+        climb_player(-1 if pushed_down else 1)
+    pl["hit"], pl["wobble"] = BUMP_COOLDOWN, WOBBLE_LIFE
+    x, y, _ = player_pos()
+    effects.append([x, y, 0.0, "#ff9a3c"])
+
+
+# ----------------------------------------------------------------- the caught ISS burns up
+# Two short phases, both a plain formula of time (so it is the same on any computer and any frame rate):
+#   FALL  the station drops from where it was caught to the top of the air, faster and faster;
+#   FIRE  it burns in the air, sinking slowly, inside a fireball that swells and shrinks, until it is gone.
+BURN_COLORS = ["#fff7d6", "#ffd36b", "#ff8a2a", "#d83a12", "#5a1408"]  # white-hot ... a cooling ember
+R_ATM = RADIUS + ATMO_WIDTH      # the top of the air: the fire starts when the station reaches this
+R_END = RADIUS + BURN_END
+wrecks = []                      # caught stations that are falling / burning
+
+
+def fire_color(f):
+    """Colour of burning metal: f = 0 white-hot ... f = 1 a cooled ember."""
+    f = clamp01(f) * (len(BURN_COLORS) - 1)
+    i = min(len(BURN_COLORS) - 2, int(f))
+    return lerp_color(BURN_COLORS[i], BURN_COLORS[i + 1], f - i)
+
+
+def start_burn():
+    """The player has just caught the station: it starts to fall from where it was. Call this BEFORE the ISS is
+    respawned. A station caught on a higher orbit has a longer way down, so it falls for longer."""
+    th, r, u, v = iss["theta"], iss["r"], iss["u"], iss["v"]
+    c, s = math.cos(th), math.sin(th)
+    pos = iss_pos()
+    r0 = math.sqrt(_dot(pos, pos))
+    tangent = _unit(tuple(-s * u[i] + c * v[i] for i in range(3)))         # the direction it was flying
+    drift = min(BURN_DRIFT, r * iss["omega"] * 20)                         # what it would cover in half a second
+    span = max(1.0, ISS_ALT_RANGE[1] * RADIUS - R_ATM)
+    high = clamp01((r0 - R_ATM) / span)                                    # 0 = just above the air, 1 = the highest orbit
+    per_s = 1000.0 / TICK_MS
+    t_fall = per_s * (BURN_FALL_MIN + (BURN_FALL - BURN_FALL_MIN) * high)
+    wrecks.append({"u0": _mul(pos, 1.0 / r0), "r0": r0, "drift": _mul(tangent, drift), "age": 0.0, "p": pos,
+                   "t_fall": t_fall, "t_fire": per_s * BURN_FIRE})
+
+
+def wreck_state(w, age):
+    """Where the wreck is `age` steps after the catch and in which phase: ((x, y, z), phase, progress 0..1).
+    Falling is ease-in (it accelerates), burning is ease-out (the air slows it down)."""
+    t_fall, t_fire = w["t_fall"], w["t_fire"]
+    if age < t_fall:
+        phase, q = "fall", age / t_fall
+        r = w["r0"] + (R_ATM - w["r0"]) * q * q
+    else:
+        q = clamp01((age - t_fall) / t_fire)
+        phase = "fire"
+        r = R_ATM + (R_END - R_ATM) * (1.0 - (1.0 - q) ** 2)
+    s = clamp01(age / (t_fall + t_fire))
+    e = 1.0 - (1.0 - s) ** 2                                               # the sideways drift slows down too
+    d = tuple(w["u0"][i] * w["r0"] + w["drift"][i] * e for i in range(3))
+    n = math.sqrt(_dot(d, d)) or 1.0
+    return (d[0] / n * r, d[1] / n * r, d[2] / n * r), phase, q
+
+
+def update_burn(steps):
+    """Advances every wreck by `steps` animation steps; a wreck whose time is up ends with a flash."""
+    for w in wrecks[:]:
+        w["age"] += steps
+        w["p"] = wreck_state(w, w["age"])[0]
+        if w["age"] >= w["t_fall"] + w["t_fire"]:
+            effects.append([w["p"][0], w["p"][1], 0.0, "#ff9a3c"])         # it is burnt out: a flash
+            wrecks.remove(w)
+
+
+def update_game(steps):
+    """Moves the turtle along its orbit (Kepler-style: lower = faster), then checks the catch and the hits.
+    Steering and altitude are NOT handled here: they change only on key presses (see on_key_press)."""
+    global score
+    pl = player
+    p, t, alt = pl["p"], pl["t"], pl["alt"]
+    phi = turtle_speed(alt) * steps                                # lower orbits are faster
+    c, s = math.cos(phi), math.sin(phi)
+    p, t = _unit(_add(_mul(p, c), _mul(t, s))), _add(_mul(t, c), _mul(p, -s))
+    t = _unit(_sub(t, _mul(p, _dot(t, p))))                        # keep t exactly perpendicular to p
+    pl["p"], pl["t"] = p, t
+    pl["hit"] = max(0.0, pl["hit"] - steps)
+    pl["wobble"] = max(0.0, pl["wobble"] - steps)
+    pos = player_pos()
+
+    if layer_on["iss"] and _dist(pos, iss_pos()) < CATCH_RADIUS:
+        score += 1
+        ix, iy, _ = iss_pos()
+        effects.append([ix, iy, 0.0, "#7dffb0"])
+        if BURN_ANIMATION:
+            start_burn()                                 # the caught station falls and burns up (see update_burn)
+        spawn_iss(pos)                                   # faster than before: it already uses the new level
+        if level() - 1 <= len(ORBITS):                   # this level brings one more ordinary satellite
+            activate_satellite(level() - 2, pos)
+    if layer_on["sats"] and pl["hit"] <= 0:
+        for sat in satellite_positions():
+            if _dist(sat, pos) < BUMP_RADIUS:
+                bump_player(sat)
+                break
+
+    update_burn(steps)
+    for e in effects:
+        e[2] += steps
+    effects[:] = [e for e in effects if e[2] < EFFECT_LIFE]
+
+
+ARROWS = ("Left", "Right", "Up", "Down")
+KEY_ACTIONS = {"Left": (turn_player, 1), "Right": (turn_player, -1), "Up": (climb_player, 1), "Down": (climb_player, -1)}
+release_jobs = {}
+
+
+def on_key_press(event):
+    """One press = one step. A key that is already down is auto-repeating: it is ignored, so holding does nothing."""
+    key = event.keysym
+    if key not in ARROWS:
+        return
+    job = release_jobs.pop(key, None)
+    if job:
+        root.after_cancel(job)
+    if key in keys_held:
+        return  # auto-repeat of a held key
+    keys_held.add(key)
+    if layer_on["game"]:
+        action, sign = KEY_ACTIONS[key]
+        action(sign)
+
+
+def on_key_release(event):
+    key = event.keysym
+    if key in ARROWS:
+        # some systems auto-repeat as release + press pairs: the key only counts as released if no press
+        # follows within 30 ms (a real second tap is much slower than that)
+        def let_go(k=key):
+            keys_held.discard(k)
+            release_jobs.pop(k, None)
+        release_jobs[key] = root.after(30, let_go)
 
 # Major cities: (latitude, longitude)
 CITIES = [
@@ -598,7 +954,7 @@ screen = turtle.Screen()
 screen.setup(WIDTH, HEIGHT)
 screen.screensize(WIDTH - 40, HEIGHT - 40)  # canvas slightly smaller than the window: (0, 0) stays centred, no scrollbars
 screen.bgcolor(BG)
-screen.title("Spinning Earth  -  F or double-click: fullscreen, H: panel, Esc: quit")
+screen.title("Spinning Earth  -  Arrows: fly the turtle, F: fullscreen, H: panel, Esc: quit")
 screen.tracer(0)
 cv = screen.getcanvas()  # draw directly on the tkinter canvas - faster than turtle
 _tcl, _cw = cv.tk.call, cv._canvas._w
@@ -622,6 +978,7 @@ quality = 0          # 0 = everything ... 3 = minimal (only ever goes down; rese
 recent = []          # real intervals (ms) between the last frames
 quality_wait = 60    # frames to wait (start-up, or after a change) before judging again
 static_k = None   # scale the static layer was built for (None = not built yet)
+static_dy = None  # ... and how far below the canvas centre it put the globe (screen pixels)
 static_imgs = []  # keeps the PhotoImage objects alive
 last_time = None
 MAX_STEPS = 4.0  # after a pause (e.g. dragging the window) the animation never jumps by more than 4 steps
@@ -646,16 +1003,28 @@ for key in ("<f>", "<F>", "<F11>"):
     root.bind(key, toggle_fullscreen)
 cv.bind("<Double-Button-1>", toggle_fullscreen, add="+")  # on the canvas only: a fast double click on a checkbox must not toggle fullscreen
 root.bind("<Escape>", exit_fullscreen)
+root.bind("<KeyPress>", on_key_press)
+root.bind("<KeyRelease>", on_key_release)
+root.bind("<FocusOut>", lambda e: keys_held.clear())  # never leave a key "stuck" when the window loses focus
 
 
 def fit_to_window():
     """Fits the canvas to the window size and returns the scale (1 = original size)."""
     global last_size, view_hw, view_hh
+    ic = cv._canvas  # the canvas widget itself: its real visible edges, not the size of the frame around it
+    view_box[:] = [ic.canvasx(0), ic.canvasy(0), ic.canvasx(ic.winfo_width()), ic.canvasy(ic.winfo_height())]
     w, h = max(2, cv.winfo_width()), max(2, cv.winfo_height())
     if (w, h) != last_size:
         last_size = (w, h)
         screen.screensize(max(100, w - 40), max(100, h - 40))  # (0, 0) stays centred
     k = min(w, h) / WIDTH
+    if layer_on["game"]:
+        # the globe (with its glow) must fit in the space BELOW the HUD plate, with GLOBE_GAP free on both sides.
+        # The plate's size depends on the scale, so refine twice.
+        for _ in range(2):
+            room = h - HUD_MARGIN - hud_metrics(k)[-1] - 2 * GLOBE_GAP
+            k = min(k, room / (2 * (RADIUS + ATMO_WIDTH)))
+        k = max(k, 0.2)
     if abs(k - 1) < 0.05:
         k = 1.0
     view_hw, view_hh = w / 2 / k, h / 2 / k
@@ -838,7 +1207,7 @@ def draw_cities(rot):
 
 def draw_satellites(front):
     """Satellites with trails. front=False - those behind the Earth (drawn before the globe, so the globe covers them)."""
-    for r, u, v, omega, phase in ORBITS:
+    for r, u, v, omega, phase in ORBITS[:active_satellites()]:
         direction = 1 if omega > 0 else -1
         theta = phase + omega * tick
         pts = []
@@ -882,14 +1251,15 @@ def draw_satellites(front):
 def draw_iss(front):
     """ISS: truss, four pairs of golden solar arrays, white modules, trail and label.
     front=False - when the station is behind the Earth (drawn before the globe, so the globe covers it)."""
-    theta = ISS_PHASE + ISS_SPEED * tick
+    theta, iss_r, iss_u, iss_v = iss["theta"], iss["r"], iss["u"], iss["v"]
     pts = []
+    trail_step = min(SAT_TRAIL_STEP, iss["omega"] * 6)  # a station that hardly moves has hardly any trail
     for j in range(ISS_TRAIL + 1):
-        t = theta - j * SAT_TRAIL_STEP
+        t = theta - j * trail_step
         c, sn = math.cos(t), math.sin(t)
-        pts.append((ISS_R * (c * ISS_U[0] + sn * ISS_V[0]),
-                    ISS_R * (c * ISS_U[1] + sn * ISS_V[1]),
-                    ISS_R * (c * ISS_U[2] + sn * ISS_V[2])))
+        pts.append((iss_r * (c * iss_u[0] + sn * iss_v[0]),
+                    iss_r * (c * iss_u[1] + sn * iss_v[1]),
+                    iss_r * (c * iss_u[2] + sn * iss_v[2])))
 
     for j in range(ISS_TRAIL):  # trail that fades out to the background colour
         (x1, y1, z1), (x2, y2, z2) = pts[j], pts[j + 1]
@@ -902,7 +1272,7 @@ def draw_iss(front):
     if (z >= 0) != front:
         return
     lvl = night_level(x)
-    k = ISS_SIZE * (0.85 + 0.15 * z / ISS_R)
+    k = ISS_SIZE * (0.85 + 0.15 * z / iss_r)
     cy = -y
     truss, panel, body = ISS_TRUSS_SHADES[lvl], ISS_PANEL_SHADES[lvl], ISS_BODY_SHADES[lvl]
     cv.create_line(x - 10 * k, cy, x + 10 * k, cy, fill=truss, width=2)        # main truss
@@ -919,6 +1289,324 @@ def draw_iss(front):
         for dx, dy, color in ((1.2, 1.2, "#05080a"), (0, 0, "#d9dee5")):  # dark shadow so it stays readable over clouds
             cv.create_text(x + 14 * k + dx, cy - 11 * k + dy, text=ISS_LABEL, anchor="w", fill=color,
                            font=("Helvetica", size, "bold"))
+
+
+# the outline of turtle.shape("turtle") from Python's turtle module: the nose is at (0, 16) and points "forward"
+TURTLE_SHAPE = [(0, 16), (-2, 14), (-1, 10), (-4, 7), (-7, 9), (-9, 8), (-6, 5), (-7, 1), (-5, -3), (-8, -6),
+                (-6, -8), (-4, -5), (0, -7), (4, -5), (6, -8), (8, -6), (5, -3), (7, 1), (6, 5), (9, 8),
+                (7, 9), (4, 7), (1, 10), (2, 14)]
+
+
+def side_runs(points):
+    """Splits a 3D polyline into runs on the near (z >= 0) and the far side of the globe:
+    [(near, [x, y, x, y, ...]), ...] with canvas y already flipped."""
+    runs = []
+    for (x1, y1, z1), (x2, y2, z2) in zip(points, points[1:]):
+        near = (z1 + z2) >= 0
+        if runs and runs[-1][0] == near:
+            runs[-1][1].extend((x2, -y2))
+        else:
+            runs.append((near, [x1, -y1, x2, -y2]))
+    return runs
+
+
+def player_path(sign, count, step):
+    """Points on the turtle's CURRENT orbit: sign=+1 ahead of it, sign=-1 behind it."""
+    p, t, r = player["p"], player["t"], player["alt"] * RADIUS
+    pts = []
+    for j in range(count + 1):
+        c, sn = math.cos(sign * j * step), math.sin(sign * j * step)
+        pts.append((r * (p[0] * c + t[0] * sn), r * (p[1] * c + t[1] * sn), r * (p[2] * c + t[2] * sn)))
+    return pts
+
+
+def draw_turtle(front):
+    """The turtle, a dotted prediction of its orbit ahead and a trail behind. front=False - while it is behind
+    the Earth (drawn before the globe, so the globe covers it); front=True - in front of it. While it is hidden
+    behind the Earth a dim outline is drawn on top, so you never lose it."""
+    pl = player
+    x, y, z = player_pos()
+    # the trail behind the turtle darkens on the night side along the same curve as everything else. It can cross
+    # the day / night line, so each piece gets its own colour; neighbours of the same colour share one line
+    pts = player_path(-1, 12, 0.05)
+    run, run_color = None, None
+    for (x1, y1, z1), (x2, y2, z2) in zip(pts, pts[1:]):
+        if (z1 + z2 >= 0) != front:                 # this piece is on the other side of the globe
+            if run:
+                cv.create_line(run, fill=run_color, width=2)
+            run = None
+            continue
+        color = lerp_color(PLAYER_TRAIL, PLAYER_TRAIL_NIGHT, night_factor((x1 + x2) / 2))
+        if run and color == run_color:
+            run += [x2, -y2]
+        else:
+            if run:
+                cv.create_line(run, fill=run_color, width=2)
+            run, run_color = [x1, -y1, x2, -y2], color
+    if run:
+        cv.create_line(run, fill=run_color, width=2)
+    for near, flat in side_runs(player_path(1, 22, PLAYER_PATH / 22)):          # where this orbit leads
+        if near == front and len(flat) >= 4:
+            cv.create_line(flat, fill="#58c98a", width=1, dash=(2, 5))
+    tx, ty = pl["t"][0], pl["t"][1]
+    n = math.hypot(tx, ty)
+    if n > 0.05:                                    # moving towards / away from the viewer: keep the last heading
+        pl["head"] = (tx / n, ty / n)
+    e0, e1 = pl["head"]
+    if pl["wobble"] > 0:                            # tumbling after a hit
+        a = 1.1 * math.sin(pl["wobble"] * 0.8) * pl["wobble"] / WOBBLE_LIFE
+        e0, e1 = e0 * math.cos(a) - e1 * math.sin(a), e0 * math.sin(a) + e1 * math.cos(a)
+    size = PLAYER_SIZE * (0.9 + 0.1 * z / (pl["alt"] * RADIUS))
+    flat = []
+    for sx, sy in TURTLE_SHAPE:                     # the same transform turtle uses: nose -> heading
+        flat.append(x + (e1 * sx + e0 * sy) * size)
+        flat.append(-(y + (-e0 * sx + e1 * sy) * size))
+    blink = pl["hit"] > 0 and int(tick / 3) % 2 == 0
+    if (z >= 0) == front:
+        if not blink:
+            dark = night_factor(x)   # 0 on the day side ... 1 in full night, the same curve the globe darkens along
+            cv.create_polygon(flat, fill=lerp_color(PLAYER_COLOR, PLAYER_COLOR_NIGHT, dark),
+                              outline=lerp_color(PLAYER_EDGE, PLAYER_EDGE_NIGHT, dark), width=1)
+    elif front:
+        cv.create_polygon(flat, fill="", outline="#3f9f6a", width=1)
+
+
+def intercept_forecast():
+    """If nothing changes (no key is pressed), where do the turtle and the ISS go? Both keep flying their current
+    orbits. Returns (seconds until they are closest, the distance in px at that moment); the time is None when
+    they only move apart from now on. If the turtle would catch the ISS (come within CATCH_RADIUS), it reports the
+    FIRST such pass, not a later closer one."""
+    pl = player
+    p, t, rt = pl["p"], pl["t"], pl["alt"] * RADIUS
+    wt = turtle_speed(pl["alt"])
+    wi, ri, u, v, th = iss["omega"], iss["r"], iss["u"], iss["v"], iss["theta"]
+
+    def gap(tau):                                   # distance after tau steps
+        c, s = math.cos(wt * tau), math.sin(wt * tau)
+        cb, sb = math.cos(th + wi * tau), math.sin(th + wi * tau)
+        dx = rt * (p[0] * c + t[0] * s) - ri * (u[0] * cb + v[0] * sb)
+        dy = rt * (p[1] * c + t[1] * s) - ri * (u[1] * cb + v[1] * sb)
+        dz = rt * (p[2] * c + t[2] * s) - ri * (u[2] * cb + v[2] * sb)
+        return math.sqrt(dx * dx + dy * dy + dz * dz)
+
+    horizon, coarse = FORECAST_SECONDS * 1000.0 / TICK_MS, 4.0
+    samples = [gap(i * coarse) for i in range(int(horizon / coarse) + 1)]   # coarse scan: every 4 steps = 0.1 s
+    best_tau, best = 0.0, samples[0]
+    first_catch = None                              # the earliest pass that gets inside the catch zone
+    for i, d in enumerate(samples):
+        # a close pass is sharp (the objects move ~10 px per step), so a coarse sample can miss its bottom:
+        # look closer around EVERY local minimum, not only the lowest sample
+        left = samples[i - 1] if i > 0 else float("inf")
+        right = samples[i + 1] if i + 1 < len(samples) else float("inf")
+        if d <= left and d <= right:
+            lo, hi = max(0.0, (i - 1) * coarse), min(horizon, (i + 1) * coarse)   # never look beyond the horizon
+            pass_tau, pass_min = lo, float("inf")
+            for j in range(33):
+                tau = lo + j * (hi - lo) / 32
+                dd = gap(tau)
+                if dd < pass_min:
+                    pass_tau, pass_min = tau, dd
+            if pass_min < best:
+                best_tau, best = pass_tau, pass_min
+            if first_catch is None and pass_min < CATCH_RADIUS:
+                first_catch = (pass_tau, pass_min)
+    if first_catch is not None:
+        # If the first pass already catches the ISS, that is the one that matters (the ISS disappears when it is
+        # caught), even when a later lap would pass a hair closer. Without this a station standing exactly on the
+        # turtle's path (two passes of ~0 px) could show the SECOND lap, decided by floating-point noise.
+        best_tau, best = first_catch
+    return (best_tau * TICK_MS / 1000.0 if best_tau > 0 else None), best
+
+
+def iss_bearing():
+    """Where the ISS is relative to the turtle's heading, in degrees: > 0 = to the left, < 0 = to the right,
+    0 = dead ahead, 180 = behind (measured along the surface, in the tangent plane at the turtle)."""
+    p, t = player["p"], player["t"]
+    iu = _unit(iss_pos())
+    d = _sub(iu, _mul(p, _dot(iu, p)))
+    if _dot(d, d) < 1e-12:
+        return 0.0
+    d = _unit(d)
+    return math.degrees(math.atan2(_dot(_cross(p, t), d), _dot(t, d)))
+
+
+HUD_COLUMNS = (("ALT", 6), ("SPD", 6), ("DST", 6), ("BRG", 6), ("ETA", 6), ("MIS", 5))  # (header, width in characters)
+HUD_LABEL_WIDTH = 4
+HUD_CLOSE, HUD_AIM = 2.5, 10   # DST turns green within HUD_CLOSE catch radii; BRG within HUD_AIM degrees of straight ahead
+HUD_TEXT, HUD_DIM, HUD_GREEN, HUD_AMBER = "#dbe4ee", "#8a99a8", "#7dffb0", "#ffd479"
+hud_fonts = {}
+
+
+def hud_font(size):
+    """(font, character width, line height) of the HUD's monospaced font at this size; cached."""
+    if size not in hud_fonts:
+        font = tkinter.font.Font(root=root, family="Courier", size=size, weight="bold")
+        hud_fonts[size] = (font, font.measure("0"), font.metrics("linespace"))
+    return hud_fonts[size]
+
+
+def hud_metrics(k):
+    """Fonts and sizes of the HUD plate at scale k: (table font, its character width, its line height, title font,
+    its character width, its line height, padding, table row height, plate height) - all in screen pixels.
+    The HUD never grows with the window: in fullscreen or a big window it keeps its normal size (k is capped at 1);
+    it only shrinks in a window smaller than the standard one, so that it does not cover the whole picture."""
+    k = min(k, 1.0)
+    table_font, cw, lh = hud_font(max(8, round(11 * k)))
+    title_font, tcw, tlh = hud_font(max(10, round(18 * k)))
+    pad, row_h = round(10 * k), round(lh * 1.2)
+    plate_h = pad + tlh + round(lh * 1.3) + 3 * row_h + pad
+    return table_font, cw, lh, title_font, tcw, tlh, pad, row_h, plate_h
+
+
+def globe_shift(k):
+    """How many screen pixels BELOW the canvas centre the globe's centre sits. With the HUD on, the globe is
+    centred between the bottom of the HUD plate and the bottom edge of the window (equal free space above and
+    below it) instead of between the top and the bottom edge. It is never pushed so low that its glow would be
+    cut off by the bottom edge, and never up. Without the HUD (game off) the globe is simply centred."""
+    left, top, right, bottom = view_box
+    if not layer_on["game"]:
+        return int(round((top + bottom) / 2))      # the true middle of the visible area
+    hud_bottom = top + HUD_MARGIN + hud_metrics(k)[-1]
+    centre = (hud_bottom + bottom) / 2
+    lowest = bottom - (RADIUS + ATMO_WIDTH) * k - 2
+    return int(round(min(centre, lowest)))
+
+
+def draw_hud():
+    """Top-right panel: score, level and a table of instruments. Drawn in screen pixels, after the globe has been
+    scaled and shifted, so the plate stays put while the globe is centred below it.
+
+    Rows: the ISS and the turtle (TUR). Columns:
+      ALT  altitude, Earth radii (green on both when they are within one altitude step - you can catch it)
+      SPD  orbital speed, degrees per second
+      DST  distance turtle - ISS, px (green when it is within 2.5 catch radii)
+      BRG  where the ISS is relative to your heading: L = left, R = right, in degrees (green when almost ahead)
+      ETA  seconds until the closest approach if you press nothing, MIS = the distance then, px.
+           MIS below the catch radius (green) means you are on a collision course and will catch it."""
+    pl = player
+    k = static_k or 1.0
+    iss_alt = iss["r"] / RADIUS
+    eta, miss = intercept_forecast()
+    bearing = iss_bearing()
+    dst = _dist(iss_pos(), player_pos())
+    per_s = 1000.0 / TICK_MS
+    aligned = abs(pl["alt"] - iss_alt) <= PLAYER_ALT_STEP * 1.01
+    course = HUD_GREEN if miss < CATCH_RADIUS else (HUD_AMBER if miss < 2 * CATCH_RADIUS else HUD_TEXT)
+    if abs(bearing) < 0.5:
+        brg = "0\u00b0"
+    else:
+        brg = "%s%d\u00b0" % ("L" if bearing > 0 else "R", round(abs(bearing)))
+    alt_color = HUD_GREEN if aligned else HUD_TEXT
+    rows = (
+        ("ISS", HUD_AMBER, [
+            ("%.2f" % iss_alt, alt_color),
+            ("%.1f" % math.degrees(iss["omega"] * per_s), HUD_TEXT),
+            ("%d" % round(dst), HUD_GREEN if dst < HUD_CLOSE * CATCH_RADIUS else HUD_TEXT),
+            (brg, HUD_GREEN if abs(bearing) < HUD_AIM else HUD_TEXT),
+            ("--" if eta is None else "%.1fs" % eta, HUD_DIM if eta is None else course),
+            ("%d" % round(miss), course)]),
+        ("TUR", PLAYER_COLOR, [
+            ("%.2f" % pl["alt"], alt_color),
+            ("%.1f" % math.degrees(turtle_speed(pl["alt"]) * per_s), HUD_TEXT),
+            ("-", HUD_DIM), ("-", HUD_DIM), ("-", HUD_DIM), ("-", HUD_DIM)]),
+    )
+
+    table_font, cw, lh, title_font, tcw, tlh, pad, row_h, plate_h = hud_metrics(k)
+    title = "SCORE: %04d" % score
+    info = "LVL %02d   SAT %02d" % (level(), active_satellites())
+    table_w = (HUD_LABEL_WIDTH + sum(w for _, w in HUD_COLUMNS)) * cw
+    plate_w = max(table_w, len(title) * tcw) + 2 * pad
+    left, top, right, bottom = view_box              # the real visible edges of the canvas, in screen pixels
+    x1, y0 = right - HUD_MARGIN, top + HUD_MARGIN    # the plate is the same distance from the right and the top edge
+    x0, y1 = x1 - plate_w, y0 + plate_h
+
+    cv.create_rectangle(x0, y0, x1, y1, fill="#0a1017", outline="#26323f")
+    tx, ty = x0 + pad, y0 + pad
+    cv.create_text(tx, ty, text=title, anchor="nw", fill=HUD_GREEN, font=title_font)
+    ty += tlh
+    cv.create_text(tx, ty, text=info, anchor="nw", fill=HUD_DIM, font=table_font)
+    ty += round(lh * 1.3)
+    right_edge = [tx + (HUD_LABEL_WIDTH + sum(w for _, w in HUD_COLUMNS[:j]) + w - 1) * cw
+                  for j, (_, w) in enumerate(HUD_COLUMNS)]   # right edge of each column (one character is the gap)
+    for (name, _), x in zip(HUD_COLUMNS, right_edge):
+        cv.create_text(x, ty, text=name, anchor="ne", fill=HUD_DIM, font=table_font)
+    ty += row_h
+    for label, label_color, cells in rows:
+        cv.create_text(tx, ty, text=label, anchor="nw", fill=label_color, font=table_font)
+        for (text, color), x in zip(cells, right_edge):
+            cv.create_text(x, ty, text=text, anchor="ne", fill=color, font=table_font)
+        ty += row_h
+
+
+def station_polys(x, y, k, ang=0.0):
+    """The ISS as plain shapes around its centre (x, y) on the screen, turned by `ang`:
+    [("truss", flat line), ("panel" | "body", flat polygon), ...]."""
+    c, s = math.cos(ang), math.sin(ang)
+
+    def rect(x0, y0, x1, y1):
+        out = []
+        for lx, ly in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
+            out += [x + (lx * c - ly * s) * k, y + (lx * s + ly * c) * k]
+        return out
+
+    shapes = [("truss", [x - 10 * k * c, y - 10 * k * s, x + 10 * k * c, y + 10 * k * s])]
+    for side in (-1, 1):
+        for half in (-1, 1):
+            shapes.append(("panel", rect(side * 10 - 2.2, half * 1.2, side * 10 + 2.2, half * 1.2 + half * 8)))
+    shapes.append(("body", rect(-1.8, -4.5, 1.8, 4.5)))
+    shapes.append(("body", rect(-4, -1.2, 4, 1.2)))
+    return shapes
+
+
+def draw_wreck(w, front):
+    """A caught station: it falls intact (turning orange as it nears the air), then burns inside ONE fireball that
+    swells and shrinks while the station melts away. front=False: while it is behind the Earth (drawn before the
+    globe, so the globe covers it); front=True: in front of it."""
+    x, y, z = w["p"]
+    if (z >= 0) != front:
+        return
+    phase, q = wreck_state(w, w["age"])[1:]
+    depth = 0.85 + 0.15 * z / math.sqrt(x * x + y * y + z * z)
+    cy = -y
+    if phase == "fall":
+        heat, shrink = 0.5 * clamp01((q - 0.6) / 0.4), 1.0 - 0.2 * q * q    # warming up; a little smaller as it drops away from us
+    else:
+        heat, shrink = 0.5 + 0.5 * q, 0.8 * (1.0 - 0.9 * q * q)            # glowing, and melting away
+        rad = (5 + 20 * math.sin(math.pi * q) ** 0.7) * (1.0 + 0.07 * math.sin(w["age"] * 3.0))
+        for scale, color in ((1.0, BURN_COLORS[3]), (0.72, BURN_COLORS[2]), (0.46, BURN_COLORS[1]), (0.22, BURN_COLORS[0])):
+            r = rad * scale
+            cv.create_oval(x - r, cy - r, x + r, cy + r, fill=color, outline="")
+    k = ISS_SIZE * depth * shrink
+    for kind, flat in station_polys(x, cy, k, 0.0):
+        base = ISS_TRUSS if kind == "truss" else ISS_PANEL if kind == "panel" else ISS_BODY
+        color = lerp_color(base, fire_color(0.3), heat)
+        if kind == "truss":
+            cv.create_line(flat, fill=color, width=2)
+        else:
+            cv.create_polygon(flat, fill=color, outline="")
+
+
+def draw_burning(front):
+    """The caught station(s) falling and burning."""
+    for w in wrecks:
+        draw_wreck(w, front)
+
+
+def draw_game_overlay():
+    """On top of everything (in the globe's coordinates): the capture ring around the ISS and the flashes."""
+    pl = player
+    if layer_on["iss"]:
+        ix, iy, iz = iss_pos()
+        px, py, pz = player_pos()
+        close = _dist((ix, iy, iz), (px, py, pz)) < HUD_CLOSE * CATCH_RADIUS
+        r = CATCH_RADIUS * (1.0 + 0.08 * math.sin(tick * 0.3))
+        color = "#7dffb0" if close else ("#ffd479" if iz >= 0 else "#8a6a30")
+        cv.create_oval(ix - r, -iy - r, ix + r, -iy + r, outline=color, width=2, dash=(5, 4))
+    for ex, ey, age, color in effects:
+        f = age / EFFECT_LIFE
+        r = 8 + 46 * f
+        cv.create_oval(ex - r, -ey - r, ex + r, -ey + r, outline=lerp_color(color, BG, f),
+                       width=max(1, round(4 * (1 - f))))
 
 
 def draw_clouds(rot):
@@ -967,10 +1655,11 @@ def draw_clouds(rot):
                 fill(clip_right(pts, XE), day)
 
 
-def build_static(k):
+def build_static(k, dy=0):
     """Builds the layers that do not change between frames and tags them "static":
-    atmosphere tiles, the ocean (a plain oval + its dark part) and the narrow night-gradient strip."""
-    global static_k, static_imgs, last_star_tick, XE
+    atmosphere tiles, the ocean (a plain oval + its dark part) and the narrow night-gradient strip.
+    dy = how many screen pixels below the canvas centre the globe's centre is put (see globe_shift)."""
+    global static_k, static_dy, static_imgs, last_star_tick, XE
     # the "full night" line is exactly where the gradient strip begins, so land, clouds and the dark ocean all
     # switch to night colours on the same pixel column; with the night layer off there is no such line at all
     XE = math.ceil(NIGHT_END * RADIUS * k) / k if layer_on["night"] else -1e9
@@ -981,19 +1670,19 @@ def build_static(k):
     for x0, y0, png in make_atmo_tiles(k):
         img = tkinter.PhotoImage(master=root, data=base64.b64encode(png))
         static_imgs.append(img)
-        cv.create_image(x0, y0, image=img, anchor="nw", tags=("static", "atmo"))
+        cv.create_image(x0, y0 + dy, image=img, anchor="nw", tags=("static", "atmo"))
     r = RADIUS * k
-    cv.create_oval(-r, -r, r, r, fill=OCEAN, outline="", tags=("static", "ocean"))
+    cv.create_oval(-r, -r + dy, r, r + dy, fill=OCEAN, outline="", tags=("static", "ocean"))
     circle = [(RADIUS * math.cos(2 * math.pi * i / 360), RADIUS * math.sin(2 * math.pi * i / 360)) for i in range(360)]
     x0, top, width, height, png = make_night_strip(k)
     if layer_on["night"]:
         dark = clip_left(circle, XE)
-        cv.create_polygon([c * k for p in dark for c in (p[0], -p[1])], fill=OCEAN_DARK, outline="",
+        cv.create_polygon([c for p in dark for c in (p[0] * k, -p[1] * k + dy)], fill=OCEAN_DARK, outline="",
                           tags=("static", "ocean"))
     img = tkinter.PhotoImage(master=root, data=base64.b64encode(png))
     static_imgs.append(img)
-    cv.create_image(x0, -top, image=img, anchor="nw", tags=("static", "shade"))
-    static_k = k
+    cv.create_image(x0, -top + dy, image=img, anchor="nw", tags=("static", "shade"))
+    static_k, static_dy = k, dy
 
 
 def apply_visibility():
@@ -1040,19 +1729,28 @@ def draw_frame():
     last_time = started
     global static_k
     k = fit_to_window()
-    if k != static_k:
-        if static_k is not None:   # window size changed: judge the quality again from scratch
+    dy = globe_shift(k)               # the globe is centred between the HUD and the bottom of the window
+    if k != static_k or dy != static_dy:
+        if static_k is not None and k != static_k:   # window size changed: judge the quality again from scratch
             quality, quality_wait = 0, 60
             recent.clear()
-        build_static(k)
+        build_static(k, dy)
         apply_visibility()            # static layer (atmosphere and ocean) is drawn once and again on resize
     else:
         cv.delete("dyn")              # the rest of the frame is redrawn every time
+    iss["theta"] += iss["omega"] * steps   # the ISS flies on its own orbit (also when the game is switched off)
+    if layer_on["game"]:
+        update_game(steps)
+    elif wrecks:
+        wrecks.clear()                # the game was switched off: nothing is left burning
     update_stars()                    # twinkle the (persistent) background stars
     if layer_on["sats"]:
         draw_satellites(front=False)  # satellites behind the Earth
     if layer_on["iss"]:
         draw_iss(front=False)         # ISS when it is behind the Earth
+    if layer_on["game"]:
+        draw_turtle(front=False)      # the turtle while it is behind the Earth
+        draw_burning(front=False)     # a burning station behind the Earth
     cv.addtag_all("behind")           # everything behind the Earth is lowered beneath the static layer (atmosphere and ocean)
     cv.dtag("static", "behind")
     cv.tag_lower("behind")
@@ -1069,11 +1767,21 @@ def draw_frame():
         draw_satellites(front=True)   # satellites in front of the Earth
     if layer_on["iss"]:
         draw_iss(front=True)          # ISS in front of the Earth
+    if layer_on["game"]:
+        draw_turtle(front=True)       # the turtle in front of the Earth (+ a dim outline while it is hidden)
+        draw_burning(front=True)      # a burning station in front of the Earth, over the night shade (it is a light source)
+        draw_game_overlay()           # ISS target ring, flashes and the score
 
     cv.addtag_all("dyn")              # tag everything drawn in this frame
     cv.dtag("static", "dyn")
     if k != 1.0:
         cv.scale("dyn", 0, 0, k, k)   # scale the image together with the window
+    if dy:
+        cv.move("dyn", 0, dy)         # and put it where the static layer put the globe
+    if layer_on["game"]:
+        draw_hud()                    # the HUD is drawn last, in screen pixels: it neither scales nor moves with the globe
+        cv.addtag_all("dyn")
+        cv.dtag("static", "dyn")
 
     angle = (angle + SPEED * steps) % (2 * math.pi)
     tick += steps
@@ -1128,6 +1836,23 @@ def toggle_panel(event=None):
         resize_window_by(-panel_width)
 
 
+# What every HUD value means, for the side panel: (name, colour of the name, explanation). The numbers come from the
+# same constants the HUD itself uses, so this text cannot drift away from the game.
+HUD_LEGEND = [
+    ("LVL", HUD_DIM, "level = caught ISS + 1"),
+    ("SAT", HUD_DIM, "satellites flying now"),
+    ("ISS", HUD_AMBER, "the station you chase"),
+    ("TUR", PLAYER_COLOR, "your turtle"),
+    ("ALT", HUD_TEXT, "altitude; green = within 1 level, catchable"),
+    ("SPD", HUD_TEXT, "orbital speed, degrees per second"),
+    ("DST", HUD_TEXT, "distance to the ISS, px; green < %d" % round(HUD_CLOSE * CATCH_RADIUS)),
+    ("BRG", HUD_TEXT, "L / R + degrees; green < %d = ahead" % HUD_AIM),
+    ("ETA", HUD_TEXT, "secs to closest pass (no keys); -- = apart"),
+    ("MIS", HUD_TEXT, "miss, px; green < %d = hit, amber < %d" % (CATCH_RADIUS, 2 * CATCH_RADIUS)),
+]
+LEGEND_WRAP = 262  # pixels: an explanation longer than this wraps instead of making the side panel wider
+
+
 def build_panel():
     """Control panel in a column left of the canvas: FPS, one checkbox per layer, and the auto-quality checkbox."""
     global panel, fps_label, graphics_label, auto_var, panel_width
@@ -1145,10 +1870,24 @@ def build_panel():
         layer_vars[key] = tkinter.BooleanVar(master=root, value=layer_on[key])
         tkinter.Checkbutton(panel, text=label, variable=layer_vars[key],
                             command=lambda k=key: on_layer_toggle(k), **look).pack(fill="x")
-    tkinter.Frame(panel, bg="#26323f", height=1).pack(fill="x", pady=8)
+    tkinter.Frame(panel, bg="#26323f", height=1).pack(fill="x", pady=6)
     auto_var = tkinter.BooleanVar(master=root, value=AUTO_QUALITY)
     tkinter.Checkbutton(panel, text="Auto-reduce graphics", variable=auto_var, command=on_auto_toggle,
                         **look).pack(fill="x")
+    tkinter.Frame(panel, bg="#26323f", height=1).pack(fill="x", pady=6)
+    tkinter.Label(panel, text="GAME", bg=PANEL_BG, fg="#8a99a8", anchor="w", font=("Helvetica", 10, "bold")).pack(anchor="w")
+    tkinter.Label(panel, text="Catch the ISS with the turtle.\nLeft / Right - turn the orbit (%d deg)\nUp / Down - raise / lower it (one step)\nEach catch: faster ISS + one more satellite" % round(math.degrees(PLAYER_TURN_STEP)),
+                  bg=PANEL_BG, fg=PANEL_FG, justify="left", anchor="w", font=("Helvetica", 11)).pack(anchor="w")
+    tkinter.Frame(panel, bg="#26323f", height=1).pack(fill="x", pady=6)
+    tkinter.Label(panel, text="HUD (top right)", bg=PANEL_BG, fg="#8a99a8", anchor="w",
+                  font=("Helvetica", 10, "bold")).pack(anchor="w")
+    legend = tkinter.Frame(panel, bg=PANEL_BG)
+    legend.pack(anchor="w", fill="x")
+    for row, (name, color, text) in enumerate(HUD_LEGEND):
+        tkinter.Label(legend, text=name, bg=PANEL_BG, fg=color, anchor="nw", font=("Courier", 11, "bold")).grid(
+            row=row, column=0, sticky="nw", padx=(0, 8), pady=1)
+        tkinter.Label(legend, text=text, bg=PANEL_BG, fg=PANEL_FG, anchor="w", justify="left", wraplength=LEGEND_WRAP,
+                      font=("Helvetica", 10)).grid(row=row, column=1, sticky="w", pady=1)
     tkinter.Label(panel, text="H - hide panel", bg=PANEL_BG, fg="#5b6b7b", anchor="w",
                   font=("Helvetica", 10)).pack(anchor="w", pady=(6, 0))
     root.update_idletasks()
