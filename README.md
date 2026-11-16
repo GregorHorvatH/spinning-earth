@@ -66,7 +66,8 @@ pyinstaller --windowed --name "Spinning Earth" index.py
 
 The result is `dist/Spinning Earth.app` (about 31 MB: Python and Tk are inside). Notes:
 
-- Tested on macOS with Apple Silicon: the app started from an environment with nothing but `/usr/bin:/bin` on the `PATH` and ran the whole game. PyInstaller builds for the machine it runs on and cannot cross-compile, so for Windows or Linux run the command on that system (not tried).
+- The program is `index.py` plus the `earth/` folder; PyInstaller finds all the modules by itself, there is nothing extra to configure.
+- Tested on macOS with Apple Silicon: the app starts and runs from an environment with nothing but `/usr/bin:/bin` on the `PATH`. PyInstaller builds for the machine it runs on and cannot cross-compile, so for Windows or Linux run the command on that system (not tried).
 - The app is only ad-hoc signed, not notarised. On another Mac the first launch may need a right click, then **Open**; this has not been tried on another Mac.
 - The build leaves `build/`, `dist/` and a `.spec` file next to the code: keep them out of version control.
 
@@ -128,7 +129,7 @@ The level is the number of caught stations plus one, and it is shown in the HUD 
 
 (The degrees per second are for an orbit at altitude 1.22; the turtle does 46 there. A lower orbit is faster for both of them.)
 
-Everything above is set by `ISS_SPEED_START`, `ISS_SPEED_FIRST_STEP`, `ISS_SPEED_DECAY`, `ISS_SPEED_MIN_STEP`, `ISS_SPEED_MAX` and `SATELLITE_COUNT` at the top of [index.py](index.py).
+Everything above is set by `ISS_SPEED_START`, `ISS_SPEED_FIRST_STEP`, `ISS_SPEED_DECAY`, `ISS_SPEED_MIN_STEP`, `ISS_SPEED_MAX` and `SATELLITE_COUNT` in [earth/config.py](earth/config.py).
 
 ### The instruments
 
@@ -144,7 +145,7 @@ TUR    1.22   45.8      -      -      -      -
 
 | Column | Meaning |
 |---|---|
-| `ALT` | altitude of the ISS and of the turtle, in Earth radii. **Green on both** when they are within one altitude level (one level is about 10 px, well inside the catch zone), which is what a catch needs. |
+| `ALT` | altitude of the ISS and of the turtle, in Earth radii. **Green on both** only when they are on the **same level**, **amber** when they differ by 1 or 2 levels, white when they are further apart. One level is about 10 px, so two levels apart is 20 px of the 30 px catch zone: you can still catch the station, but only with a more exact position. |
 | `SPD` | orbital speed, degrees per second. |
 | `DST` | distance from the turtle to the ISS, in pixels (the catch zone is `CATCH_RADIUS` = 30). Green when it is within 2.5 catch radii. |
 | `BRG` | where the ISS is relative to the turtle's heading: `L` = to the left, `R` = to the right, in degrees (`0°` = dead ahead, `180°` = behind). Green when it is within 10 degrees of straight ahead. |
@@ -155,7 +156,7 @@ TUR    1.22   45.8      -      -      -      -
 
 Ordinary satellites are not in the table: the forecast covers the station only.
 
-The same explanations are always on screen: the **HUD (top right)** section of the side panel lists every value of the table, in the same colours, with the thresholds at which it turns green or amber. Those numbers are taken from the constants the HUD itself uses (`CATCH_RADIUS`, `HUD_CLOSE`, `HUD_AIM`), so the text cannot drift away from the game. Hide the panel with `H` when you no longer need it.
+The same explanations are always on screen: the **HUD (top right)** section of the side panel lists every value of the table, in the same colours, with the thresholds at which it turns green or amber. Those numbers are taken from the constants the HUD itself uses (`CATCH_RADIUS`, `HUD_CLOSE`, `HUD_AIM`, `HUD_ALT_NEAR`), so the text cannot drift away from the game. Hide the panel with `H` when you no longer need it.
 
 ### Window and layout
 
@@ -187,11 +188,11 @@ A ticked box means the layer is shown; an unticked one hides it completely (and 
 - **Day / night** off means the whole globe is lit evenly and the atmosphere is not dimmed. City lights only exist at night, so they disappear too.
 - **Auto-reduce graphics** is the automatic quality reduction for slow computers (see [Performance](#performance)). Untick it and the graphics will never be degraded automatically; if it had already degraded them, they are restored to full at once.
 - The panel is a column next to the picture, not an overlay: native widgets on top of a canvas that is redrawn every frame make macOS recompose them constantly, which cost about 25 FPS in testing. Hiding it with `H` shrinks the window back by the panel's width.
-- Set `SHOW_PANEL = False` in [index.py](index.py) to start with the panel hidden.
+- Set `SHOW_PANEL = False` in [earth/config.py](earth/config.py) to start with the panel hidden.
 
 ## Configuration
 
-All parameters are constants at the top of [index.py](index.py). Change a value and run it again.
+All settings are constants in [earth/config.py](earth/config.py), each with a comment; the map data (`CONTINENTS` and `CITIES`) is in [earth/data.py](earth/data.py). Change a value in the file and run the program again (the values are read when the program starts, not while it runs).
 
 | Constant | What it changes |
 |---|---|
@@ -216,14 +217,16 @@ All parameters are constants at the top of [index.py](index.py). Change a value 
 | `BURN_DRIFT`, `BURN_END` | how far it drifts sideways while falling, and how close to the ground it ends |
 | `ISS_SPEED_START`, `ISS_SPEED_FIRST_STEP`, `ISS_SPEED_DECAY`, `ISS_SPEED_MIN_STEP`, `ISS_SPEED_MAX` | the difficulty curve: how much faster the ISS gets with every level |
 | `FORECAST_SECONDS` | how far ahead the `ETA` and `MIS` instruments look |
-| `HUD_CLOSE`, `HUD_AIM` | where `DST` (in catch radii) and `BRG` (in degrees) turn green; the side-panel legend follows them |
+| `HUD_CLOSE`, `HUD_AIM`, `HUD_ALT_NEAR` | where `DST` (in catch radii) and `BRG` (in degrees) turn green, and how many levels apart `ALT` stays amber instead of white; the side-panel legend follows them |
 | `GLOBE_GAP` | minimum free space between the globe and the HUD above it and the window edge below it |
 | `CITY_COLOR`, `CITY_DOTS`, `CITY_VISIBLE_FROM` | colour of the lights, number of smaller lights and how early they switch off |
-| `CITIES` | list of cities as `(latitude, longitude)` pairs - add your own |
-| `CONTINENTS` | simplified outlines of continents and islands |
-| other colours and sizes | many more are constants at the top of [index.py](index.py), each with a comment: the cloud (`CLOUD_*`), satellite (`SAT_*`) and ISS (`ISS_*`) colours, `PLAYER_REF_ALT` (the turtle's start altitude), `ISS_ORBIT` (the first station's altitude), `NIGHT_STEPS` and so on |
+| `CITIES` (in `earth/data.py`) | list of cities as `(latitude, longitude)` pairs - add your own |
+| `CONTINENTS` (in `earth/data.py`) | simplified outlines of continents and islands |
+| other colours and sizes | many more are constants in [earth/config.py](earth/config.py), each with a comment: the cloud (`CLOUD_*`), satellite (`SAT_*`) and ISS (`ISS_*`) colours, `PLAYER_REF_ALT` (the turtle's start altitude), `ISS_ORBIT` (the first station's altitude), `NIGHT_STEPS` and so on |
 
 ## How it works
+
+(Where each part of this lives in the code: see [Layout](#layout).)
 
 - The continents are a set of simplified polygons with `(longitude, latitude)` coordinates. They are projected onto a sphere, rotated and drawn on a tkinter canvas.
 - **Night.** Objects on the night side are drawn in plain dark colours. The smooth day-to-night gradient is one narrow semi-transparent black image laid over the globe, so the ocean, land and clouds all darken together without stacking dozens of clipped polygons.
@@ -267,10 +270,40 @@ A layer is shown only if its checkbox is ticked **and** the automatic quality le
 
 ## Layout
 
+The program is `index.py` (the frame loop and `main()`) plus the `earth/` package:
+
 ```
 globe/
-├── index.py          - the whole program
+├── index.py            - entry point: draw_frame() (what happens every frame) and main()
+├── earth/
+│   ├── config.py       - all settings: sizes, speeds, colours, game balance
+│   ├── state.py        - everything that changes while the program runs
+│   ├── data.py         - map data: CONTINENTS and CITIES
+│   ├── util.py         - colours, vector maths, PNG encoding
+│   ├── night.py        - the day / night curve and the night colours
+│   ├── window.py       - the window, the canvas, fast drawing helpers, fullscreen
+│   ├── layout.py       - scale and position of the globe and of the HUD
+│   ├── geometry.py     - projection of the sphere, polygon helpers
+│   ├── land.py         - the continents
+│   ├── clouds.py       - the stream of clouds
+│   ├── stars.py        - the stars
+│   ├── cities.py       - city lights
+│   ├── images.py       - pre-rendered atmosphere glow and night gradient
+│   ├── scene.py        - the static layer, which layers are visible, automatic quality
+│   ├── orbits.py       - orbits of the satellites and of the ISS
+│   ├── game.py         - the game: levels, collisions, forecast, burning (logic only)
+│   ├── controls.py     - keyboard and mouse
+│   ├── sprites.py      - drawing the satellites, the ISS, the turtle, a burning wreck
+│   ├── hud.py          - the table of instruments
+│   └── panel.py        - the control panel
 ├── docs/
 │   └── screenshot.png
 └── README.md
 ```
+
+Things worth knowing before you change the code:
+
+- **Run `index.py`.** Importing the modules does real work: `earth/window.py` opens the window as soon as it is imported.
+- **There are no circular imports.** Each module imports exactly the names it uses (`from earth.config import RADIUS, ...`).
+- **A value that is *rebound* while the program runs lives in `earth/state.py` and is used as `state.quality`.** `from earth.state import quality` would give a stale copy that never updates. Things that are only changed in place (the `layer_on` dict, the `recent` list) can be imported by name. Constants never change while the program runs, so they are imported by name.
+- `game.py` only computes (it does not even import the window); the drawing of the game's objects is in `sprites.py` and `hud.py`, so the rules of the game can be changed without touching the picture.
